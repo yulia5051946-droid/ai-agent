@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "lib": ["esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": false,
+    "outDir": ".next/server-build",
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["server.ts", "lib/**/*.ts", "types/**/*.ts"],
+  "exclude": ["node_modules"]
+}

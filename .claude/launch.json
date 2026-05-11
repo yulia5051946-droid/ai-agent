@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "contract-tracker",
+      "runtimeExecutable": "cmd.exe",
+      "runtimeArgs": ["/c", "start-dev.cmd"],
+      "port": 3000,
+      "autoPort": false
+    }
+  ]
+}
