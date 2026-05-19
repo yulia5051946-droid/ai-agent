@@ -4,7 +4,7 @@ import { fetchContractThreads, fetchInvoiceEmails, extractLatestContractVersion,
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
 import { upsertContractCache, getAllContractCache, getAllManualLocks, upsertInvoiceRecord, getLegalNotesMap, getAllTeamMembers, isBDMember } from '@/lib/db'
 import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
-import type { Contract, ContractStatus, GameType } from '@/types'
+import type { Contract, ContractStatus, GameType, SheetContractData } from '@/types'
 
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 
