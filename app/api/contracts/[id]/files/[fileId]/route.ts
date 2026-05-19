@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth } from '@/auth'
 import { deleteContractFile, getContractFiles } from '@/lib/db'
 import { deleteFileFromDrive } from '@/lib/drive'
 import { readFile, unlink } from 'fs/promises'
@@ -14,7 +13,7 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string; fileId: string }> }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) return NextResponse.json({ error: '未授權' }, { status: 401 })
 
   const { id, fileId } = await params
@@ -45,7 +44,7 @@ export async function DELETE(
   _request: Request,
   { params }: { params: Promise<{ id: string; fileId: string }> }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) return NextResponse.json({ error: '未授權' }, { status: 401 })
 
   const { id, fileId } = await params

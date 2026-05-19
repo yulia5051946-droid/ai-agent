@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, type ReactNode } from 'react'
 import Link from 'next/link'
-import { StatusBadge, StaleBadge } from '@/components/StatusBadge'
+import { StatusBadge, StaleBadge, FinanceBadge } from '@/components/StatusBadge'
 import { LoadingSpinner } from '@/components/LoadingSpinner'
 import type { Contract, ContractStatus, GameType } from '@/types'
 
@@ -34,6 +34,10 @@ export default function DashboardPage() {
   const [sortDir, setSortDir] = useState<'asc' | 'desc' | null>(null)
   const [filterStale, setFilterStale] = useState<'overdue' | 'warning' | null>(null)
   const [activeGame, setActiveGame] = useState<GameType | 'all'>('all')
+  const [grSearch, setGrSearch] = useState('')
+  const [grSearching, setGrSearching] = useState(false)
+  const [grSearchResult, setGrSearchResult] = useState<{ found: boolean; grNumber: string; partner?: string; status?: string; cached?: boolean; message?: string } | null>(null)
+  const [isBD, setIsBD] = useState(false)
 
   const fetchContracts = async (forceRefresh = false) => {
     try {
@@ -49,7 +53,10 @@ export default function DashboardPage() {
   }
 
   useEffect(() => {
-    fetchContracts().finally(() => setLoading(false))
+    Promise.all([
+      fetchContracts(),
+      fetch('/api/me').then(r => r.json()).then((d: { isBD?: boolean }) => setIsBD(d.isBD ?? false)).catch(() => {}),
+    ]).finally(() => setLoading(false))
   }, [])
 
   const handleRefresh = async () => {
@@ -86,18 +93,50 @@ export default function DashboardPage() {
     })
   }, [contracts, showCancelled, activeGame, filterGame, filterStatus, filterLegal, search, filterStale])
 
+  const DONE_STATUSES = ['合約取消', '合約完成']
+
   const sorted = useMemo(() => {
-    if (!sortDir) return filtered
     return [...filtered].sort((a, b) => {
+      // 終態（取消 / 完成）永遠排到最後
+      const aDone = DONE_STATUSES.includes(a.status) ? 1 : 0
+      const bDone = DONE_STATUSES.includes(b.status) ? 1 : 0
+      if (aDone !== bDone) return aDone - bDone
+
+      // 同組內：依申請日期排序
       const da = a.appliedAt ? new Date(a.appliedAt).getTime() : 0
       const db = b.appliedAt ? new Date(b.appliedAt).getTime() : 0
-      return sortDir === 'asc' ? da - db : db - da
+      if (sortDir === 'asc') return da - db
+      // 預設 desc（晚到早），也是 sortDir==='desc' 的行為
+      return db - da
     })
   }, [filtered, sortDir])
 
   const handleSortApplied = () => {
     setSortDir(d => d === 'asc' ? 'desc' : d === 'desc' ? null : 'asc')
     setPage(1)
+  }
+
+  const handleGrSearch = async () => {
+    const q = grSearch.trim()
+    if (!q) return
+    setGrSearching(true)
+    setGrSearchResult(null)
+    try {
+      const res = await fetch('/api/contracts/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ grNumber: q }),
+      })
+      const data = await res.json() as { found: boolean; grNumber: string; partner?: string; status?: string; cached?: boolean; message?: string; error?: string }
+      if (data.error) { setGrSearchResult({ found: false, grNumber: q, message: data.error }); return }
+      setGrSearchResult(data)
+      // 若找到新合約，重新載入清單
+      if (data.found && !data.cached) await fetchContracts()
+    } catch {
+      setGrSearchResult({ found: false, grNumber: q, message: '搜尋失敗，請稍後再試' })
+    } finally {
+      setGrSearching(false)
+    }
   }
 
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE))
@@ -128,19 +167,74 @@ export default function DashboardPage() {
           <h1 className="text-xl font-bold text-gray-900">合約總覽</h1>
           <p className="text-sm text-gray-500 mt-0.5">共 {stats.total} 份進行中</p>
         </div>
-        <button
-          onClick={handleRefresh}
-          disabled={refreshing}
-          className="btn-primary flex items-center gap-2 text-sm self-start"
-        >
-          {refreshing ? (
+        <div className="flex flex-wrap items-center gap-2 self-start">
+          {/* 直接搜尋 GR — 僅 BD 成員可用 */}
+          {isBD && (
             <>
-              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              更新中...
+              <div className="flex items-center gap-1">
+                <input
+                  type="text"
+                  placeholder="輸入 GR 號搜尋..."
+                  value={grSearch}
+                  onChange={e => { setGrSearch(e.target.value); setGrSearchResult(null) }}
+                  onKeyDown={e => e.key === 'Enter' && handleGrSearch()}
+                  className="w-40 border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
+                />
+                <button
+                  onClick={handleGrSearch}
+                  disabled={grSearching || !grSearch.trim()}
+                  className="btn-secondary text-sm px-3 py-2 disabled:opacity-50"
+                >
+                  {grSearching ? <span className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin inline-block" /> : '搜尋'}
+                </button>
+              </div>
+              <button
+                onClick={handleRefresh}
+                disabled={refreshing}
+                className="btn-primary flex items-center gap-2 text-sm"
+              >
+                {refreshing ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    更新中...
+                  </>
+                ) : '同步郵件'}
+              </button>
             </>
-          ) : '同步郵件'}
-        </button>
+          )}
+        </div>
       </div>
+
+      {/* GR 搜尋結果 */}
+      {grSearchResult && (
+        <div className={`rounded-lg px-4 py-3 text-sm flex items-center justify-between gap-3 ${
+          grSearchResult.found ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-700'
+        }`}>
+          <div>
+            {grSearchResult.found ? (
+              <>
+                <span className="font-medium">{grSearchResult.grNumber}</span>
+                {grSearchResult.partner && <span className="ml-2 text-green-700">{grSearchResult.partner}</span>}
+                {grSearchResult.status && <span className="ml-2 text-green-600">｜{grSearchResult.status}</span>}
+                {grSearchResult.cached
+                  ? <span className="ml-2 text-xs text-green-500">（已在清單中）</span>
+                  : <span className="ml-2 text-xs text-green-500">✓ 已加入清單</span>
+                }
+              </>
+            ) : (
+              <span>{grSearchResult.message || `找不到 ${grSearchResult.grNumber}`}</span>
+            )}
+          </div>
+          {grSearchResult.found && (
+            <a
+              href={`/dashboard/contract/${grSearchResult.grNumber}`}
+              className="shrink-0 text-xs underline hover:no-underline"
+            >
+              查看詳情 →
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Game Tabs */}
       <div className="flex gap-1 border-b border-gray-200">
@@ -437,9 +531,15 @@ function ContractRow({ contract: c, onGameChange }: { contract: Contract; onGame
       </td>
       <td className="px-3 py-2 whitespace-nowrap text-gray-600">{c.responsibleLegal || '-'}</td>
       <td className="px-3 py-2 whitespace-nowrap">
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           <StatusBadge status={c.status} locked={c.isManuallyLocked} />
           <StaleBadge days={c.daysStale || 0} />
+          {/* 財務確認狀態：僅在法務已提供版本或清稿後才顯示 */}
+          {(c.status === '已提供最終清稿待用印' ||
+            c.status === '待財務確認' ||
+            (typeof c.status === 'string' && c.status.startsWith('法務已提供'))) &&
+            <FinanceBadge confirmed={c.financeConfirmed} />
+          }
         </div>
       </td>
       <Td>{c.partner}</Td>

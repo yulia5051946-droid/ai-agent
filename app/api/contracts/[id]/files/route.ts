@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth } from '@/auth'
 import { getContractFiles, addContractFile, getAllContractCache } from '@/lib/db'
 import { uploadContractFileToDrive } from '@/lib/drive'
 import { writeFile, mkdir } from 'fs/promises'
@@ -26,7 +25,7 @@ export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) return NextResponse.json({ error: '未授權' }, { status: 401 })
 
   const { id } = await params
@@ -38,7 +37,7 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) return NextResponse.json({ error: '未授權' }, { status: 401 })
 
   const { id } = await params

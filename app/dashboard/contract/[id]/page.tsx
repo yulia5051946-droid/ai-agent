@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams } from 'next/navigation'
 import Link from 'next/link'
-import { StatusBadge, GameBadge, StaleBadge } from '@/components/StatusBadge'
+import { StatusBadge, GameBadge, StaleBadge, FinanceBadge } from '@/components/StatusBadge'
 import { LoadingSpinner } from '@/components/LoadingSpinner'
 import type { ContractDetail, ContractStatus } from '@/types'
 
@@ -117,6 +117,11 @@ export default function ContractDetailPage() {
               <GameBadge game={contract.game} />
               <StatusBadge status={contract.status} locked={contract.isManuallyLocked} />
               <StaleBadge days={contract.daysStale || 0} />
+              {(contract.status === '已提供最終清稿待用印' ||
+                contract.status === '待財務確認' ||
+                (typeof contract.status === 'string' && contract.status.startsWith('法務已提供'))) &&
+                <FinanceBadge confirmed={contract.financeConfirmed} />
+              }
             </div>
             <p className="text-gray-600 text-sm truncate">{contract.subject}</p>
           </div>
@@ -257,21 +262,8 @@ export default function ContractDetailPage() {
               </>
             )}
 
-            {contract.sheetData && (
-              <>
-                <hr className="my-4 border-gray-100" />
-                <h3 className="text-sm font-medium text-gray-700 mb-3">試算表資料（即時）</h3>
-                <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
-                  <InfoItem label="內容簡述" value={contract.sheetData.description} />
-                  <InfoItem label="合作類型" value={contract.sheetData.type} />
-                  <InfoItem label="我方提供" value={contract.sheetData.ourProvisions} />
-                  <InfoItem label="對方提供" value={contract.sheetData.theirProvisions} />
-                  {contract.sheetData.sponsorAmountNTD && <InfoItem label="贊助金額 NTD" value={contract.sheetData.sponsorAmountNTD} />}
-                  {contract.sheetData.sponsorAmountUSD && <InfoItem label="贊助金額 USD" value={contract.sheetData.sponsorAmountUSD} />}
-                  <InfoItem label="負責人" value={contract.sheetData.responsiblePerson} />
-                </dl>
-              </>
-            )}
+            <hr className="my-4 border-gray-100" />
+            <SheetLinkPanel grNumber={id} sheetData={contract.sheetData} />
           </div>
 
           {/* Timeline */}
@@ -552,6 +544,212 @@ function TimelineItem({ item }: { item: { date: string; from: string; role: stri
               <span className="text-gray-400 shrink-0">({formatSize(a.size)})</span>
             </a>
           ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── SheetLinkPanel ────────────────────────────────────────────────────────────
+interface SheetCandidate {
+  rowKey: string
+  partner: string
+  description: string
+  type: string
+  game: string
+  exposureSeason: string
+  cooperationPeriod: string
+  responsiblePerson: string
+  currentGr: string | null
+  isLinkedToThis: boolean
+}
+
+function SheetLinkPanel({
+  grNumber,
+  sheetData,
+}: {
+  grNumber: string
+  sheetData?: { description?: string; type?: string; responsiblePerson?: string; exposureSeason?: string; sponsorAmountNTD?: string; sponsorAmountUSD?: string; ourProvisions?: string; theirProvisions?: string; } | null
+}) {
+  const [open, setOpen] = useState(false)
+  const [candidates, setCandidates] = useState<SheetCandidate[]>([])
+  const [contractGame, setContractGame] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [savedKey, setSavedKey] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const [search, setSearch] = useState('')
+
+  const fetchCandidates = async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/contracts/${grNumber}/sheet-link`)
+      const data = await res.json() as { candidates?: SheetCandidate[]; contractGame?: string; error?: string }
+      if (data.error) throw new Error(data.error)
+      setCandidates(data.candidates || [])
+      setContractGame(data.contractGame || '')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '讀取失敗')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleOpen = () => {
+    setOpen(true)
+    if (candidates.length === 0) fetchCandidates()
+  }
+
+  const handleLink = async (rowKey: string) => {
+    setSaving(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/contracts/${grNumber}/sheet-link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rowKey }),
+      })
+      const data = await res.json() as { success?: boolean; error?: string }
+      if (data.error) throw new Error(data.error)
+      setSavedKey(rowKey)
+      setOpen(false)
+      // Update local candidates to reflect new link
+      setCandidates(prev => prev.map(c => ({
+        ...c,
+        isLinkedToThis: c.rowKey === rowKey,
+        currentGr: c.rowKey === rowKey ? grNumber : (c.isLinkedToThis ? null : c.currentGr),
+      })))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '連結失敗')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const filtered = search.trim()
+    ? candidates.filter(c =>
+        [c.partner, c.description, c.type, c.exposureSeason, c.responsiblePerson]
+          .join(' ').toLowerCase().includes(search.trim().toLowerCase())
+      )
+    : candidates
+
+  const linkedCandidate = candidates.find(c => c.isLinkedToThis)
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-medium text-gray-700">
+          試算表資料
+          {(linkedCandidate || savedKey) && (
+            <span className="ml-2 text-xs text-emerald-600 font-normal">✓ 已連結</span>
+          )}
+        </h3>
+        <button
+          onClick={handleOpen}
+          className="text-xs text-orange-500 hover:text-orange-700 border border-orange-200 rounded px-2 py-0.5 hover:bg-orange-50 transition-colors"
+        >
+          {sheetData ? '重新對應 Sheet 列' : '手動連結 Sheet 列'}
+        </button>
+      </div>
+
+      {/* Current match preview */}
+      {sheetData ? (
+        <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+          <InfoItem label="內容簡述" value={sheetData.description} />
+          <InfoItem label="合作類型" value={sheetData.type} />
+          <InfoItem label="我方提供" value={sheetData.ourProvisions} />
+          <InfoItem label="對方提供" value={sheetData.theirProvisions} />
+          {sheetData.sponsorAmountNTD && <InfoItem label="贊助金額 NTD" value={sheetData.sponsorAmountNTD} />}
+          {sheetData.sponsorAmountUSD && <InfoItem label="贊助金額 USD" value={sheetData.sponsorAmountUSD} />}
+          <InfoItem label="負責人" value={sheetData.responsiblePerson} />
+        </dl>
+      ) : (
+        <p className="text-sm text-gray-400 italic">尚未比對到試算表列，請手動連結</p>
+      )}
+
+      {/* Picker modal */}
+      {open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setOpen(false)}>
+          <div
+            className="bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+              <div>
+                <h2 className="font-semibold text-gray-900">選擇 Sheet 列</h2>
+                <p className="text-xs text-gray-500 mt-0.5">選擇後系統會自動在試算表寫入 GR 編號，下次同步即可精準比對</p>
+              </div>
+              <button onClick={() => setOpen(false)} className="text-gray-400 hover:text-gray-600 text-lg leading-none">✕</button>
+            </div>
+
+            <div className="px-5 py-3 border-b border-gray-100">
+              <input
+                type="text"
+                placeholder="搜尋廠商名稱、內容簡述、負責人..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
+                autoFocus
+              />
+            </div>
+
+            <div className="overflow-y-auto flex-1 px-2 py-2">
+              {loading && (
+                <div className="py-12 text-center text-gray-400 text-sm">載入試算表中...</div>
+              )}
+              {error && (
+                <div className="py-4 text-center text-red-500 text-sm">{error}</div>
+              )}
+              {!loading && filtered.length === 0 && (
+                <div className="py-12 text-center text-gray-400 text-sm">沒有符合的列</div>
+              )}
+              {!loading && filtered.map(c => {
+                const isCurrentGame = c.game === contractGame
+                const isLinked = c.isLinkedToThis || c.rowKey === savedKey
+                const isOtherGr = c.currentGr && !c.isLinkedToThis
+
+                return (
+                  <div
+                    key={c.rowKey}
+                    className={`px-4 py-3 rounded-lg mb-1.5 border cursor-pointer transition-all ${
+                      isLinked
+                        ? 'bg-emerald-50 border-emerald-200'
+                        : isOtherGr
+                        ? 'bg-gray-50 border-gray-100 opacity-60'
+                        : 'bg-white border-gray-100 hover:bg-orange-50 hover:border-orange-200'
+                    }`}
+                    onClick={() => !saving && handleLink(c.rowKey)}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`text-xs px-1.5 py-0.5 rounded font-medium shrink-0 ${
+                          isCurrentGame ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-500'
+                        }`}>{c.game}</span>
+                        <span className="font-medium text-gray-900 truncate text-sm">{c.partner}</span>
+                        {c.exposureSeason && <span className="text-xs text-gray-400 shrink-0">{c.exposureSeason}</span>}
+                      </div>
+                      <div className="shrink-0 text-xs">
+                        {isLinked && <span className="text-emerald-600 font-medium">✓ 已連結</span>}
+                        {isOtherGr && <span className="text-gray-400">已連 {c.currentGr}</span>}
+                        {saving && <span className="text-orange-400">寫入中...</span>}
+                      </div>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1 truncate">{c.description || '（無描述）'}</p>
+                    {(c.type || c.cooperationPeriod) && (
+                      <p className="text-xs text-gray-400 mt-0.5">
+                        {[c.type, c.cooperationPeriod].filter(Boolean).join(' · ')}
+                      </p>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            <div className="px-5 py-3 border-t border-gray-100 text-xs text-gray-400">
+              共 {filtered.length} 列{search ? `（已篩選，全部 ${candidates.length} 列）` : ''}
+            </div>
+          </div>
         </div>
       )}
     </div>

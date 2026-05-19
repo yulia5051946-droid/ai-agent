@@ -1,11 +1,10 @@
 import { NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread } from '@/lib/claude'
 
 export async function POST(request: Request) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) {
     return NextResponse.json({ error: '未授權' }, { status: 401 })
   }

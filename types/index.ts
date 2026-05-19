@@ -83,6 +83,11 @@ export interface SheetContractData {
   sponsorAmountUSD?: string
   responsiblePerson: string
   game: GameType
+  // Internal metadata for GR↔sheet row linkage (not rendered in UI)
+  _rowIndex?: number        // 1-based row index in the spreadsheet (header = row 1, data starts at row 2)
+  _spreadsheetId?: string   // Google Sheets spreadsheetId
+  _sheetTitle?: string      // Tab name (e.g. "S14")
+  _grLinked?: string | null // Value already in the GR column for this row (null = column exists but empty, undefined = no GR column)
 }
 
 export interface ContractCache {

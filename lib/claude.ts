@@ -1,4 +1,3 @@
-import Anthropic from '@anthropic-ai/sdk'
 import type { GmailThread, GmailMessage } from './gmail'
 import { getEmailRole, stripQuotedContent } from './gmail'
 import type { ContractStatus, EmailTimelineItem } from '@/types'
@@ -17,54 +16,111 @@ function isValidStatus(s: string): boolean {
   return DYNAMIC_STATUS_PREFIXES.some(prefix => s.startsWith(prefix))
 }
 
-async function analyzeStatusWithAI(
-  recentEmails: { from: string; role: string; date: string; body: string }[],
-  subject: string,
-  contractVersion: string | null
-): Promise<ContractStatus | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) return null
+function detectStatusByKeywords(
+  legalEmail: { body: string; date: string; attachmentNames?: string[] } | null,
+  financeEmail: { body: string } | null,
+  bdEmail: { body: string; date: string; attachmentNames?: string[] } | null,
+  contractVersion: string | null,
+  grNumber: string
+): ContractStatus | null {
+  if (!legalEmail && !bdEmail) return null  // 完全沒有法務或 BD 信，維持預設
 
-  const emailBlock = recentEmails.map((e, i) => {
-    const idx = recentEmails.length - i
-    return `--- 第 ${idx} 封（最新）---\n寄件人：${e.from}（${e.role}）\n時間：${e.date}\n內容：\n${e.body}`
-  }).join('\n\n')
+  // 版本號（去掉 v 前綴，只保留數字）
+  const ver = contractVersion ? contractVersion.replace(/^v/i, '') : '1'
 
-  const versionHint = contractVersion ? `目前附件中最新合約版本：${contractVersion}` : '尚未偵測到合約版本號'
+  const legalBody = legalEmail?.body.toLowerCase() ?? ''
+  const financeBody = financeEmail?.body.toLowerCase() ?? ''
+  const bdBody = bdEmail?.body.toLowerCase() ?? ''
 
-  const prompt = `你是合約追蹤助理，請閱讀以下合約郵件（最新一封在最前面），判斷合約目前處於哪個階段。
+  // 財務是否已確認
+  // 若財務信同時包含「請調整/請說明/請補充」等要求，視為尚未確認（部分有問題）
+  const financeHasRequest = /請調整|請修改|需要調整|請說明|請補充|請提供|請確認.*以下|please.*adjust|please.*clarify|please.*provide|please.*confirm.*below/i.test(financeBody)
+  const financeOk = financeEmail !== null &&
+    !financeHasRequest &&
+    /沒有意見|沒有其他意見|沒有問題|確認|no.*comment|no further|ok|approve|財務確認|payment.*ok/i.test(financeBody)
 
-合約主旨：${subject}
-${versionHint}
+  // 法務信關鍵字
+  const isCleanDraft = legalEmail !== null && (
+    /clean|清稿|\[clean\]|final.*version|最終版|no further comment|no.*further.*comment|legal has no further|沒有其他意見|法律沒有意見|審閱完畢|沒有修改|無修改意見/i.test(legalBody) ||
+    /\[clean\]/i.test(legalEmail.attachmentNames?.join(' ') ?? '')
+  )
 
-${emailBlock}
+  const legalHasDraft = legalEmail !== null && (
+    /請.*確認|provide.*draft|附上|如附件|as attached|draft|合約版本|提供.*合約|版本/i.test(legalBody) ||
+    (legalEmail.attachmentNames?.length ?? 0) > 0
+  )
 
-請根據郵件實際討論的內容判斷狀態，狀態只能是以下其中一個（X 請替換為實際版本號，若不知道就用 1）：
-- 法務尚未回覆：BD 已送出申請，但法務尚未有任何回覆
-- 確定法務負責人：法務已有回覆，但尚未確認由誰負責審閱本案
-- 待財務確認：財務尚未確認付款條件
-- 法務已提供(第X版)合約 待BD反饋：法務在與 BD 的往來中提供了合約版本，請 BD 確認是否可對外
-- 已提供(第X版) 待品牌反饋：BD 已將合約版本提供給品牌方，等待品牌回覆
-- 品牌已反饋(第X版) 待法務反饋：品牌方對合約有新的意見，需要法務回應
-- 已提供最終清稿待用印：條款已確認，正在安排雙方用印
-- 合約完成：雙方已完成簽署或用印（終態）
-- 合約取消：合作確認取消，法務或對方在郵件中明確表示不進行（終態）
+  const isCancel = /取消|cancel|不進行|終止|withdraw/i.test(legalBody + ' ' + bdBody)
+  const isComplete = /用印完成|雙方.*簽署|signed|完成簽署|執行本/i.test(legalBody + ' ' + bdBody)
 
-只回傳 JSON，不要有其他文字：{"status":"狀態名稱（含版本號）"}`
+  // BD 信關鍵字
+  // 品牌已給反饋（優先判斷，避免被附件誤判成送出）
+  const bdGotBrandFeedback =
+    /反饋|feedback|品牌.*意見|廠商.*回覆|brand.*comment|對方.*意見|他們.*說|廠商.*說|修改意見|回覆如附件|意見如附件|請再確認|請.*review|please.*review|please.*confirm.*again/i.test(bdBody)
 
-  const client = new Anthropic({ apiKey })
-  try {
-    const res = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 150,
-      messages: [{ role: 'user', content: prompt }],
-    })
-    const text = res.content[0].type === 'text' ? res.content[0].text.trim() : ''
-    const parsed = JSON.parse(text.match(/\{.*\}/s)?.[0] || '{}')
-    console.log(`[AI Status] ${subject.slice(0, 40)} → "${parsed.status}"`)
-    if (parsed.status && isValidStatus(parsed.status)) return parsed.status as ContractStatus
-  } catch (err) {
-    console.error(`[AI Status] 分析失敗: ${subject.slice(0, 40)}`, String(err))
+  // BD 主動送出合約給品牌（附件本身不算，要有送出的動詞）
+  const bdSentToBrand = !bdGotBrandFeedback && (
+    /提供.*品牌|送出.*合約|已傳給|forward|寄給.*廠商|provide.*brand|已送出|send.*contract|已提供.*品牌|品牌.*確認.*版本/i.test(bdBody) ||
+    ((bdEmail?.attachmentNames?.length ?? 0) > 0 &&
+      /請.*確認(?!.*反饋)|please.*check|供.*參考|如附件.*請.*確認/i.test(bdBody))
+  )
+
+  // BD 的最後一封信是否比法務的更新
+  const bdIsNewer = bdEmail !== null && legalEmail !== null &&
+    new Date(bdEmail.date) > new Date(legalEmail.date)
+
+  const onlyBD = bdEmail !== null && legalEmail === null
+
+  // 判斷邏輯（終態優先）
+  if (isComplete) { console.log(`[Rules ${grNumber}] 合約完成`); return '合約完成' }
+  if (isCancel)   { console.log(`[Rules ${grNumber}] 合約取消`); return '合約取消' }
+
+  // 法務清稿後：看 BD 是否有後續動作
+  // 注意：財務狀態由 financeConfirmed 欄位獨立追蹤，不影響主要合約狀態
+  if (isCleanDraft) {
+    if ((bdIsNewer || onlyBD) && bdGotBrandFeedback) {
+      console.log(`[Rules ${grNumber}] 法務清稿 → BD 收到品牌反饋 → 品牌已反饋(第${ver}版) 待法務反饋`)
+      return `品牌已反饋(第${ver}版) 待法務反饋` as ContractStatus
+    }
+    if ((bdIsNewer || onlyBD) && bdSentToBrand) {
+      console.log(`[Rules ${grNumber}] 法務清稿 → BD 已送品牌 → 已提供(第${ver}版) 待品牌反饋`)
+      return `已提供(第${ver}版) 待品牌反饋` as ContractStatus
+    }
+    // 財務確認狀態透過 financeConfirmed badge 單獨顯示，主狀態顯示法務進度
+    console.log(`[Rules ${grNumber}] 法務清稿（財務狀態獨立追蹤）→ 已提供最終清稿待用印`)
+    return '已提供最終清稿待用印'
+  }
+
+  // 法務提供版本後：看 BD 是否有後續動作
+  if (legalHasDraft) {
+    if ((bdIsNewer || onlyBD) && bdGotBrandFeedback) {
+      console.log(`[Rules ${grNumber}] 法務提供版本 → BD 收到品牌反饋 → 品牌已反饋(第${ver}版) 待法務反饋`)
+      return `品牌已反饋(第${ver}版) 待法務反饋` as ContractStatus
+    }
+    if ((bdIsNewer || onlyBD) && bdSentToBrand) {
+      console.log(`[Rules ${grNumber}] 法務提供版本 → BD 已送品牌 → 已提供(第${ver}版) 待品牌反饋`)
+      return `已提供(第${ver}版) 待品牌反饋` as ContractStatus
+    }
+    console.log(`[Rules ${grNumber}] 法務提供版本 → 法務已提供(第${ver}版)合約 待BD反饋`)
+    return `法務已提供(第${ver}版)合約 待BD反饋` as ContractStatus
+  }
+
+  // 只有 BD 的信（法務尚未回覆或不在 thread）
+  if (onlyBD) {
+    if (bdGotBrandFeedback) {
+      console.log(`[Rules ${grNumber}] 僅 BD（品牌已反饋）→ 品牌已反饋(第${ver}版) 待法務反饋`)
+      return `品牌已反饋(第${ver}版) 待法務反饋` as ContractStatus
+    }
+    if (bdSentToBrand) {
+      console.log(`[Rules ${grNumber}] 僅 BD（已送品牌）→ 已提供(第${ver}版) 待品牌反饋`)
+      return `已提供(第${ver}版) 待品牌反饋` as ContractStatus
+    }
+  }
+
+  // 法務有回覆但沒有明確動作
+  if (legalEmail) {
+    console.log(`[Rules ${grNumber}] 法務已回覆（無明確動作）→ 確定法務負責人`)
+    return '確定法務負責人'
   }
 
   return null
@@ -98,25 +154,56 @@ export async function analyzeContractThread(
 ): Promise<AnalysisResult> {
   const result = analyzeByRules(thread, teamMembers)
 
-  // AI 分析狀態：取最近 5 封非系統信送給 Claude 判斷
+  // AI 分析狀態：法務最後一封 + 財務最後一封，合併給 AI 判斷綜合狀態
   const role = (from: string) => getEmailRole(from, teamMembers)
-  const recentEmails = [...thread.messages]
-    .filter(m => role(m.from) !== '系統')
-    .slice(-5)
-    .reverse()
-    .map(m => ({
-      from: m.from,
-      role: role(m.from),
-      date: m.date ? new Date(m.date).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' }) : '',
-      body: stripQuotedContent(m.bodyText || m.snippet || '').slice(0, 800),
-    }))
 
-  if (recentEmails.length > 0) {
-    const aiStatus = await analyzeStatusWithAI(recentEmails, thread.subject, result.contractVersion)
-    if (aiStatus !== null) result.status = aiStatus
+  const lastLegalMsg   = [...thread.messages].filter(m => role(m.from) === '法務').at(-1)
+  const lastFinanceMsg = [...thread.messages].filter(m => role(m.from) === '財務').at(-1)
+  const lastBDMsg      = [...thread.messages].filter(m => role(m.from) === 'BD').at(-1)
+
+  const legalEntry = lastLegalMsg ? {
+    body: stripQuotedContent(lastLegalMsg.bodyText || lastLegalMsg.snippet || ''),
+    date: lastLegalMsg.date || '',
+    attachmentNames: lastLegalMsg.attachmentNames,
+  } : null
+
+  const financeEntry = lastFinanceMsg ? {
+    body: stripQuotedContent(lastFinanceMsg.bodyText || lastFinanceMsg.snippet || ''),
+  } : null
+
+  const bdEntry = lastBDMsg ? {
+    body: stripQuotedContent(lastBDMsg.bodyText || lastBDMsg.snippet || ''),
+    date: lastBDMsg.date || '',
+    attachmentNames: lastBDMsg.attachmentNames,
+  } : null
+
+  const detectedStatus = detectStatusByKeywords(legalEntry, financeEntry, bdEntry, result.contractVersion, thread.grNumber)
+  if (detectedStatus !== null) {
+    result.status = detectedStatus
+    result.nextAction = deriveNextAction(detectedStatus)
+    const lastMsg = thread.messages[thread.messages.length - 1]
+    result.summary = deriveSum(thread.grNumber, result.contractType, detectedStatus, thread.messages.length, lastMsg?.date ?? null)
   }
 
   return result
+}
+
+function deriveNextAction(status: ContractStatus): string {
+  if (status === '法務尚未回覆') return '催促法務回覆合約審閱意見'
+  if (status === '確定法務負責人') return '確認負責法務人員並確認申請無誤'
+  if (status === '待財務確認') return '等待財務確認付款條件'
+  if (status.startsWith('法務已提供')) return '確認法務提供的合約版本，決定是否可對外提供品牌'
+  if (status.startsWith('已提供')) return '催促品牌回覆合約意見'
+  if (status.startsWith('品牌已反饋')) return '將品牌意見轉交法務處理'
+  if (status === '已提供最終清稿待用印') return '確認財務付款條件，並追蹤用印進度'
+  if (status === '合約完成') return '確認用印文件已歸檔'
+  if (status === '合約取消') return '無需後續行動'
+  return '請確認合約最新進度'
+}
+
+function deriveSum(grNumber: string, contractType: string | null, status: ContractStatus, msgCount: number, lastDate: string | null): string {
+  const dateStr = lastDate ? new Date(lastDate).toLocaleDateString('zh-TW') : '不明'
+  return `合約 ${grNumber}（${contractType ?? '合約'}）目前狀態：${status}。共 ${msgCount} 封郵件往來。最後更新：${dateStr}。`
 }
 
 function analyzeByRules(thread: GmailThread, teamMembers?: TeamMemberLike[]): AnalysisResult {
@@ -131,19 +218,8 @@ function analyzeByRules(thread: GmailThread, teamMembers?: TeamMemberLike[]): An
   const allText = cleanedMessages.map(m => m.snippet + ' ' + m.bodyText).join('\n')
   const role = (from: string) => getEmailRole(from, teamMembers)
 
-  // 以最後一封（非系統）郵件的寄件人角色判斷狀態
-  const lastReal = [...cleanedMessages].reverse().find(m => role(m.from) !== '系統')
-
-  // ── Status ──────────────────────────────────────────────────────────────
-  let status: ContractStatus = '法務尚未回覆'
-
-  if (lastReal) {
-    const lastRole = role(lastReal.from)
-    if (lastRole === '法務') status = '已回覆確認中'
-    else if (lastRole === '財務') status = '待財務確認'
-    else if (lastRole === 'BD') status = '已提供清稿待品牌反饋'
-    else if (lastRole === '其他') status = '品牌已反饋'
-  }
+  // ── Status 預設值：法務尚未回覆（實際狀態由 AI 在 analyzeContractThread 覆寫）──
+  const status: ContractStatus = '法務尚未回覆'
 
   // ── Responsible legal（從法務信找寄件人，比對 teamMembers）────────────────
   let responsibleLegal: string | null = null
@@ -181,10 +257,14 @@ function analyzeByRules(thread: GmailThread, teamMembers?: TeamMemberLike[]): An
   }
 
   // ── Finance confirmed ────────────────────────────────────────────────────
-  const financeConfirmed = cleanedMessages.some(m =>
-    role(m.from) === '財務' &&
-    /付款條件沒有問題|財務沒有問題|payment\s*ok|沒問題|確認無誤|付款條件確認|財務確認|ok.*付款|approve/i.test(m.snippet + m.bodyText)
-  )
+  // 若財務信含「請調整/請說明」等要求性語句，代表尚未完全確認，不算 confirmed
+  const financeConfirmed = cleanedMessages.some(m => {
+    if (role(m.from) !== '財務') return false
+    const text = m.snippet + m.bodyText
+    const hasRequest = /請調整|請修改|需要調整|請說明|請補充|請提供|請確認.*以下/i.test(text)
+    if (hasRequest) return false
+    return /付款條件沒有問題|財務沒有問題|payment\s*ok|沒問題|確認無誤|付款條件確認|財務確認|ok.*付款|approve/i.test(text)
+  })
 
   // ── Contract type ────────────────────────────────────────────────────────
   const contractType = detectContractType(thread.subject)
@@ -227,20 +307,10 @@ function analyzeByRules(thread: GmailThread, teamMembers?: TeamMemberLike[]): An
     if (text) legalProgressNote = text
   }
 
-  // ── Next action ──────────────────────────────────────────────────────────
-  let nextAction = '請確認合約最新進度'
-  if (status === '法務尚未回覆') nextAction = '催促法務回覆合約審閱意見'
-  else if (status === '確定法務負責人') nextAction = '確認負責法務人員並確認申請無誤'
-  else if (status === '待財務確認') nextAction = '等待財務確認付款條件'
-  else if (status.startsWith('法務已提供')) nextAction = '確認法務提供的合約版本，決定是否可對外提供品牌'
-  else if (status.startsWith('已提供')) nextAction = '催促品牌回覆合約意見'
-  else if (status.startsWith('品牌已反饋')) nextAction = '將品牌意見轉交法務處理'
-  else if (status === '已提供最終清稿待用印') nextAction = '追蹤用印進度，確認雙方完成簽署'
-  else if (status === '合約完成') nextAction = '確認用印文件已歸檔'
-  else if (status === '合約取消') nextAction = '無需後續行動'
+  const nextAction = deriveNextAction(status)
 
   const lastMsg = messages[messages.length - 1]
-  const summary = `合約 ${thread.grNumber}（${contractType}）目前狀態：${status}。共 ${messages.length} 封郵件往來。最後更新：${lastMsg?.date ? new Date(lastMsg.date).toLocaleDateString('zh-TW') : '不明'}。`
+  const summary = deriveSum(thread.grNumber, contractType, status, messages.length, lastMsg?.date ?? null)
 
   return {
     status,

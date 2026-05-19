@@ -483,3 +483,20 @@ export function deleteTeamMember(id: number): void {
   const database = getDb()
   database.prepare('DELETE FROM team_members WHERE id = ?').run(id)
 }
+
+/** 查詢指定 email 的角色，不在 team_members 中的預設為 'BD'（避免誤擋）*/
+export function getMemberRole(email: string): TeamMember['role'] | null {
+  const database = getDb()
+  const row = database.prepare(
+    'SELECT role FROM team_members WHERE lower(email) = lower(?)'
+  ).get(email) as { role: string } | undefined
+  return row ? (row.role as TeamMember['role']) : null
+}
+
+/** 確認是否為 BD 成員（允許同步 Gmail）*/
+export function isBDMember(email: string): boolean {
+  const role = getMemberRole(email)
+  // 未在 team_members 的帳號預設允許（BD 新成員還沒加進去的情境）
+  if (role === null) return true
+  return role === 'BD'
+}

@@ -1,13 +1,12 @@
 import { NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth as getAuth } from '@/auth'
 import { google } from 'googleapis'
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ messageId: string; attachmentId: string }> }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await getAuth()
   if (!session?.accessToken) return NextResponse.json({ error: '未授權' }, { status: 401 })
 
   const { messageId, attachmentId } = await params
@@ -15,9 +14,9 @@ export async function GET(
   const filename = searchParams.get('filename') || 'attachment'
   const mimeType = searchParams.get('mime') || 'application/octet-stream'
 
-  const auth = new google.auth.OAuth2()
-  auth.setCredentials({ access_token: session.accessToken })
-  const gmail = google.gmail({ version: 'v1', auth })
+  const oAuth2 = new google.auth.OAuth2()
+  oAuth2.setCredentials({ access_token: session.accessToken })
+  const gmail = google.gmail({ version: 'v1', auth: oAuth2 })
 
   const res = await gmail.users.messages.attachments.get({
     userId: 'me',

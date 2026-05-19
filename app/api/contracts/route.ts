@@ -1,10 +1,9 @@
 import { NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth } from '@/auth'
 import { fetchContractThreads, fetchInvoiceEmails, extractLatestContractVersion, extractAppliedDate, detectFinanceInfo } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
-import { upsertContractCache, getAllContractCache, getAllManualLocks, upsertInvoiceRecord, getLegalNotesMap, getAllTeamMembers } from '@/lib/db'
-import { fetchAllSheetData, matchSheetData } from '@/lib/sheets'
+import { upsertContractCache, getAllContractCache, getAllManualLocks, upsertInvoiceRecord, getLegalNotesMap, getAllTeamMembers, isBDMember } from '@/lib/db'
+import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
 import type { Contract, ContractStatus, GameType } from '@/types'
 
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
@@ -16,14 +15,14 @@ function daysSince(dateStr: string | null): number {
 }
 
 function detectGame(subject: string): GameType {
-  if (/AOV|傳說對決|Arena of Valor/i.test(subject)) return 'AOV'
-  if (/DF|決鬥|Undawn/i.test(subject)) return 'DF'
-  if (/CODM|使命召喚/i.test(subject)) return 'CODM'
+  if (/\bAOV\b|傳說對決|Arena of Valor/i.test(subject)) return 'AOV'
+  if (/\bCODM\b|使命召喚/i.test(subject)) return 'CODM'   // CODM 先判，避免被 DF 誤吃
+  if (/\bDF\b|決鬥|Undawn/i.test(subject)) return 'DF'
   return 'unknown'
 }
 
 export async function GET(request: Request) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) {
     return NextResponse.json({ error: '未授權' }, { status: 401 })
   }
@@ -34,6 +33,11 @@ export async function GET(request: Request) {
   // Check if we have recent cached data
   const cached = getAllContractCache()
   const manualLocks = getAllManualLocks()
+
+  // 只有 BD 成員可以觸發 Gmail 同步；非 BD 直接回快取
+  if (forceRefresh && !isBDMember(session.user?.email || '')) {
+    return NextResponse.json(buildContractList(cached, manualLocks))
+  }
 
   if (!forceRefresh && cached.length > 0) {
     const mostRecentUpdate = cached.reduce((latest, c) => {
@@ -63,7 +67,7 @@ export async function GET(request: Request) {
       const filtered = game !== 'unknown'
         ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === game)))
         : allSheetData
-      const matched = matchSheetData(partner, filtered, desc)
+      const matched = matchSheetData(partner, filtered, desc, t.grNumber)
       if (!matched) console.log(`[Sheets] 未比對 ${t.grNumber}(${game}): 廠商「${partner}」`)
       else console.log(`[Sheets] 比對到 ${t.grNumber}(${game}): 廠商「${partner}」→「${matched.partner}」`)
     })
@@ -95,12 +99,31 @@ export async function GET(request: Request) {
           const emailDesc = extractDescription(thread.subject)
           const existingCache = cached.find(c => c.grNumber === thread.grNumber)
 
-          // 只在該合約所屬遊戲的 Sheet 資料中比對，避免跨遊戲誤抓
+          // 決定有效遊戲：手動設定 > subject 偵測 > cache 舊值
+          const gameManual = existingCache?.gameManual ?? false
           const detectedGame = detectGame(thread.subject)
-          const gameSheetData = detectedGame !== 'unknown'
-            ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === detectedGame)))
+          const effectiveGame: GameType = gameManual
+            ? (existingCache!.game as GameType)
+            : (detectedGame !== 'unknown' ? detectedGame : (existingCache?.game as GameType | undefined) ?? 'unknown')
+
+          // 只在有效遊戲的 Sheet 資料中比對，避免跨遊戲誤抓
+          // effectiveGame 為 unknown 才用全部（不擴大到 AOV 的列）
+          const gameSheetData = effectiveGame !== 'unknown'
+            ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === effectiveGame)))
             : allSheetData
-          const sheetData = matchSheetData(partner, gameSheetData, emailDesc)
+          const sheetData = matchSheetData(partner, gameSheetData, emailDesc, thread.grNumber)
+
+          if (sheetData && thread.grNumber && sheetData._grLinked !== thread.grNumber) {
+            // Fire and forget — don't await, don't block analysis
+            writeGrNumberToSheet(session.accessToken, sheetData, thread.grNumber).catch(err =>
+              console.error(`[Sheets] ${thread.grNumber} 回寫失敗:`, String(err))
+            )
+          }
+
+          // 遊戲欄位：手動設定的不被 sheetData 覆寫
+          const finalGame: GameType = gameManual
+            ? (existingCache!.game as GameType)
+            : ((sheetData?.game as GameType | undefined) ?? effectiveGame)
 
           const TERMINAL_STATUSES: ContractStatus[] = ['合約取消', '合約完成']
           const cachedStatus = existingCache?.status as ContractStatus | undefined
@@ -108,12 +131,12 @@ export async function GET(request: Request) {
             ? cachedStatus
             : analysis.status
 
-          console.log(`[Status] ${thread.grNumber}: cache="${cachedStatus}" ai="${analysis.status}" final="${finalStatus}"`)
+          console.log(`[Status] ${thread.grNumber}(${effectiveGame}): cache="${cachedStatus}" ai="${analysis.status}" final="${finalStatus}"`)
           upsertContractCache({
             grNumber: thread.grNumber,
             threadId: thread.threadId,
-            game: (sheetData?.game) || detectGame(thread.subject),
-            gameManual: existingCache?.gameManual ?? false,
+            game: finalGame,
+            gameManual,
             partner,
             subject: thread.subject,
             appliedAt,

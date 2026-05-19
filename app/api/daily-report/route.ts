@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth } from '@/auth'
 import nodemailer from 'nodemailer'
 import { getAllContractCache, getAllManualLocks } from '@/lib/db'
 import { generateDailyReportContent } from '@/lib/claude'
@@ -18,7 +17,7 @@ export async function POST(request: Request) {
   const cronSecret = process.env.CRON_SECRET
 
   if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-    const session = await getServerSession(authOptions)
+    const session = await auth()
     if (!session?.accessToken) {
       return NextResponse.json({ error: '未授權' }, { status: 401 })
     }

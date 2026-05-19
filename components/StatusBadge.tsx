@@ -38,6 +38,22 @@ export function StaleBadge({ days }: { days: number }) {
   )
 }
 
+export function FinanceBadge({ confirmed }: { confirmed?: boolean }) {
+  if (confirmed === undefined) return null
+  if (confirmed) {
+    return (
+      <span className="badge bg-emerald-100 text-emerald-700 ml-1" title="財務已確認">
+        財務✓
+      </span>
+    )
+  }
+  return (
+    <span className="badge bg-purple-100 text-purple-600 ml-1" title="財務尚未確認">
+      財務待確
+    </span>
+  )
+}
+
 export function GameBadge({ game }: { game: string }) {
   const styles: Record<string, string> = {
     AOV: 'bg-indigo-100 text-indigo-700',

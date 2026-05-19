@@ -1,17 +1,16 @@
 import { NextResponse } from 'next/server'
-import { getServerSession } from 'next-auth'
-import { authOptions } from '@/lib/auth'
+import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
-import { fetchAllSheetData, matchSheetData } from '@/lib/sheets'
+import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
 import { getContractCache, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, setManualGame } from '@/lib/db'
-import type { ContractDetail, ContractStatus } from '@/types'
+import type { ContractDetail, ContractStatus, GameType } from '@/types'
 
 export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) {
     return NextResponse.json({ error: '未授權' }, { status: 401 })
   }
@@ -41,16 +40,36 @@ export async function GET(
   let sheetData = undefined
   try {
     const allSheetData = await fetchAllSheetData(session.accessToken)
-    const found = matchSheetData(cached?.partner || '', allSheetData, extractDescription(thread.subject))
-    if (found) sheetData = found
+    // 手動設定的遊戲優先，避免 sheet 比對結果覆寫
+    const cachedGame = cached?.game as GameType | undefined
+    const gameManual = cached?.gameManual ?? false
+    const effectiveGame: GameType = gameManual
+      ? (cachedGame ?? 'unknown')
+      : (cachedGame ?? 'unknown')
+    const gameSheetData = effectiveGame !== 'unknown'
+      ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === effectiveGame)))
+      : allSheetData
+    const found = matchSheetData(cached?.partner || '', gameSheetData, extractDescription(thread.subject), grNumber)
+    if (found) {
+      sheetData = found
+      if (found._grLinked !== grNumber) {
+        writeGrNumberToSheet(session.accessToken, found, grNumber).catch(() => {})
+      }
+    }
   } catch {
     // Sheet fetch is optional
   }
 
+  // game：手動設定不被 sheetData 覆寫
+  const gameManualFlag = cached?.gameManual ?? false
+  const resolvedGame = gameManualFlag
+    ? (cached?.game || 'unknown')
+    : (sheetData?.game || cached?.game || 'unknown')
+
   const status: ContractStatus = lock ? lock.status : analysis.status
   const detail: ContractDetail = {
     grNumber,
-    game: (sheetData?.game || cached?.game || 'unknown') as ContractDetail['game'],
+    game: resolvedGame as ContractDetail['game'],
     partner: cached?.partner || '',
     subject: thread.subject,
     appliedAt: cached?.appliedAt || null,
@@ -92,7 +111,7 @@ export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const session = await getServerSession(authOptions)
+  const session = await auth()
   if (!session?.accessToken) {
     return NextResponse.json({ error: '未授權' }, { status: 401 })
   }

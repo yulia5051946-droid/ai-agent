@@ -3,10 +3,14 @@ import type { EmailTimelineItem, FinanceInfo } from '@/types'
 
 const MAILSUITE_FILTER = /mailsuite/i
 const CONTRACT_SUBJECT_PATTERN = /[\[【]?合約審閱[\]】]?/
-const GR_NUMBER_PATTERN = /GR\d{3,8}/i
+const GR_NUMBER_PATTERN = /GR[\s\-]?\d{3,8}/i   // 允許 GR001164 / GR-001164 / GR 001164
 const INVOICE_SUBJECT = /Thanks for filling out this form: Garena 發票開立申請單/
 
-const LEGAL_TEAM = ['lindai@garena.com', 'tsengw@garena.com', 'land@garena.com']
+const LEGAL_TEAM = [
+  'lindai@garena.com', 'lindai@sea.com',
+  'tsengw@garena.com', 'tsengw@sea.com',
+  'land@garena.com',   'land@sea.com',
+]
 const FINANCE_TEAM = ['wuc@sea.com', 'linr@sea.com', 'lui@sea.com']
 const BD_TEAM = ['liny@garena.com', 'chenla@garena.com']
 
@@ -47,21 +51,32 @@ function createGmailClient(accessToken: string) {
 export async function fetchContractThreads(accessToken: string): Promise<GmailThread[]> {
   const gmail = createGmailClient(accessToken)
 
-  const res = await gmail.users.threads.list({
-    userId: 'me',
-    q: 'subject:合約審閱',
-    maxResults: 500,
-  })
+  // 分頁抓完全部符合的 thread（Gmail 單次最多 500，超過需 nextPageToken）
+  const allThreadIds: string[] = []
+  let pageToken: string | undefined
 
-  const threads = res.data.threads || []
+  do {
+    const res = await gmail.users.threads.list({
+      userId: 'me',
+      q: 'subject:合約審閱',
+      maxResults: 500,
+      pageToken,
+    })
+    const page = res.data.threads || []
+    allThreadIds.push(...page.map(t => t.id!))
+    pageToken = res.data.nextPageToken ?? undefined
+  } while (pageToken)
+
+  console.log(`[Gmail] 共找到 ${allThreadIds.length} 個合約審閱 thread`)
+
   const results: GmailThread[] = []
 
   // Batch fetch with concurrency limit
   const batchSize = 10
-  for (let i = 0; i < threads.length; i += batchSize) {
-    const batch = threads.slice(i, i + batchSize)
+  for (let i = 0; i < allThreadIds.length; i += batchSize) {
+    const batch = allThreadIds.slice(i, i + batchSize)
     const resolved = await Promise.all(
-      batch.map(t => fetchThread(gmail, t.id!).catch(() => null))
+      batch.map(id => fetchThread(gmail, id).catch(() => null))
     )
     for (const thread of resolved) {
       if (thread) results.push(thread)
@@ -74,16 +89,31 @@ export async function fetchContractThreads(accessToken: string): Promise<GmailTh
 export async function fetchThreadByGrNumber(accessToken: string, grNumber: string): Promise<GmailThread | null> {
   const gmail = createGmailClient(accessToken)
 
-  const res = await gmail.users.threads.list({
-    userId: 'me',
-    q: `subject:合約審閱 subject:${grNumber}`,
-    maxResults: 5,
-  })
+  // 優先搜有 [合約審閱] 的 thread；找不到再放寬搜整個信箱（標題或內容含 GR 號）
+  const queries = [
+    `subject:合約審閱 subject:${grNumber}`,  // 標準格式
+    `subject:合約審閱 ${grNumber}`,           // GR 在內容
+    grNumber,                                  // 最廣：信箱全文搜尋
+  ]
 
-  const threads = res.data.threads || []
-  if (threads.length === 0) return null
+  for (const q of queries) {
+    const res = await gmail.users.threads.list({ userId: 'me', q, maxResults: 5 })
+    const threads = res.data.threads || []
+    if (threads.length === 0) continue
 
-  return fetchThread(gmail, threads[0].id!)
+    const resolved = await Promise.all(
+      threads.map(t => fetchThread(gmail, t.id!).catch(() => null))
+    )
+    const valid = resolved.filter(Boolean) as GmailThread[]
+    // 只取確實含這個 GR 號的 thread
+    const matched = valid.filter(t => t.grNumber.toUpperCase() === grNumber.toUpperCase())
+    if (matched.length === 0) continue
+
+    // 多個符合時取訊息數最多的（主要合約 thread）
+    return matched.reduce((best, t) => t.messages.length > best.messages.length ? t : best)
+  }
+
+  return null
 }
 
 export async function fetchInvoiceEmails(accessToken: string): Promise<Map<string, { appliedAt: string; amount: string | null }>> {
@@ -176,12 +206,15 @@ async function fetchThread(
     const msgSubject = headers.find(h => h.name === 'Subject')?.value || ''
     const date = headers.find(h => h.name === 'Date')?.value || ''
 
+    // 只要 subject 有「合約審閱」就存下來當 thread subject
     if (CONTRACT_SUBJECT_PATTERN.test(msgSubject)) {
       if (!subject) subject = msgSubject
-      if (!grNumber) {
-        const grMatch = msgSubject.match(GR_NUMBER_PATTERN)
-        if (grMatch) grNumber = grMatch[0].toUpperCase()
-      }
+    }
+
+    // GR 號碼：掃所有 message 的 subject（不限合約審閱格式）
+    if (!grNumber) {
+      const grMatch = msgSubject.match(GR_NUMBER_PATTERN)
+      if (grMatch) grNumber = grMatch[0].replace(/[\s\-]/g, '').toUpperCase()
     }
 
     // Filter out Mailsuite tracking messages
@@ -216,15 +249,21 @@ async function fetchThread(
     })
   }
 
-  // Fallback: scan snippets and body text for GR number if not found in subject
+  // Fallback: scan snippets and body text for GR number if not found in any subject
   if (!grNumber) {
     for (const msg of parsedMessages) {
       const grMatch = (msg.snippet + ' ' + msg.bodyText).match(GR_NUMBER_PATTERN)
-      if (grMatch) { grNumber = grMatch[0].toUpperCase(); break }
+      if (grMatch) {
+        grNumber = grMatch[0].replace(/[\s\-]/g, '').toUpperCase()
+        break
+      }
     }
   }
 
-  if (!grNumber) return null
+  if (!grNumber) {
+    console.warn(`[Gmail] thread ${threadId} 無法取得 GR 號碼，略過（subject: "${subject}"）`)
+    return null
+  }
 
   // Use the most descriptive subject (the one with [合約審閱])
   if (!subject && parsedMessages.length > 0) subject = parsedMessages[0].subject
@@ -271,17 +310,19 @@ export function getEmailRole(
 
   if (/no-reply|noreply|mailer-daemon|mailsuite|postmaster/i.test(emailLower)) return '系統'
 
+  // 先查 DB 的 teamMembers
   if (teamMembers && teamMembers.length > 0) {
     for (const m of teamMembers) {
       if (emailLower.includes(m.email.toLowerCase())) {
         return m.role as EmailTimelineItem['role']
       }
     }
-  } else {
-    if (LEGAL_TEAM.some(e => emailLower.includes(e))) return '法務'
-    if (FINANCE_TEAM.some(e => emailLower.includes(e))) return '財務'
-    if (BD_TEAM.some(e => emailLower.includes(e))) return 'BD'
   }
+
+  // 不管有沒有 teamMembers，hardcoded 清單一定查（避免法務被誤判成 BD）
+  if (LEGAL_TEAM.some(e => emailLower.includes(e))) return '法務'
+  if (FINANCE_TEAM.some(e => emailLower.includes(e))) return '財務'
+  if (BD_TEAM.some(e => emailLower.includes(e))) return 'BD'
 
   // Domain-based fallback
   if (emailLower.includes('@sea.com')) return '財務'

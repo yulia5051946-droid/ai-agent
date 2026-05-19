@@ -69,13 +69,25 @@ export async function fetchGameSheetData(
 
   // Resolve sheet tab name from gid
   const meta = await sheets.spreadsheets.get({ spreadsheetId: config.spreadsheetId })
-  const sheetMeta = meta.data.sheets?.find(s => s.properties?.sheetId === config.gid)
-  const sheetTitle = sheetMeta?.properties?.title
-  if (!sheetTitle) {
-    const available = meta.data.sheets?.map(s => `${s.properties?.title}(gid=${s.properties?.sheetId})`).join(', ')
-    console.error(`[Sheets] ${config.game} 找不到 gid=${config.gid}，可用頁籤：${available}`)
-    return map
+  const allSheets = meta.data.sheets || []
+  let sheetMeta = allSheets.find(s => s.properties?.sheetId === config.gid)
+
+  if (!sheetMeta) {
+    const available = allSheets.map(s => `${s.properties?.title}(gid=${s.properties?.sheetId})`).join(', ')
+    console.warn(`[Sheets] ${config.game} 找不到 gid=${config.gid}，可用頁籤：${available}`)
+    // Fallback: 找最後一個非隱藏頁籤（通常是最新賽季）
+    const visibleSheets = allSheets.filter(s => !s.properties?.hidden)
+    sheetMeta = visibleSheets[visibleSheets.length - 1]
+    if (sheetMeta) {
+      console.warn(`[Sheets] ${config.game} 自動改用頁籤「${sheetMeta.properties?.title}」（gid=${sheetMeta.properties?.sheetId}）`)
+    } else {
+      console.error(`[Sheets] ${config.game} 無可用頁籤，跳過`)
+      return map
+    }
   }
+
+  const sheetTitle = sheetMeta.properties?.title
+  if (!sheetTitle) return map
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: config.spreadsheetId,
@@ -88,6 +100,9 @@ export async function fetchGameSheetData(
   const headers = rows[0].map((h: string) => String(h).trim())
   console.log(`[Sheets] ${config.game} 頁籤「${sheetTitle}」欄位：`, headers.join(' | '))
   console.log(`[Sheets] ${config.game} 共 ${rows.length - 1} 筆資料`)
+
+  // Find GR 編號 column index (-1 if not present)
+  const grColIdx = headers.findIndex(h => /GR|GR.?編號|GR.?number/i.test(h))
 
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i]
@@ -126,6 +141,11 @@ export async function fetchGameSheetData(
       sponsorAmountUSD: sponsorAmountUSD || undefined,
       responsiblePerson: get('負責人'),
       game: config.game,
+      // Internal metadata for GR↔sheet row linkage
+      _rowIndex: i + 1,  // header is row 1, data row i → spreadsheet row i+1
+      _spreadsheetId: config.spreadsheetId,
+      _sheetTitle: sheetTitle,
+      _grLinked: grColIdx >= 0 ? (String(row[grColIdx] || '').trim() || null) : undefined,
     }
 
     // 用 partner（品牌名）和 company（公司名）都當 key 建立索引
@@ -143,20 +163,36 @@ export async function fetchGameSheetData(
 export function matchSheetData(
   partner: string,
   allSheetData: Map<string, SheetContractData[]>,
-  emailDescription?: string | null
+  emailDescription?: string | null,
+  grNumber?: string | null,
 ): SheetContractData | null {
   if (!partner && !emailDescription) return null
 
   const norm = (s: string) => s.toLowerCase().replace(/[\s_\-（）()]/g, '')
 
+  // 0. GR 編號精準比對（最高優先）
+  if (grNumber) {
+    const grUpper = grNumber.toUpperCase()
+    for (const [, rows] of allSheetData.entries()) {
+      const exact = rows.find(r => r._grLinked && r._grLinked.toUpperCase() === grUpper)
+      if (exact) return exact
+    }
+  }
+
   // 候選清單取得後，用描述相似度選最佳一筆
+  // 同時過濾掉已被其他 GR 認領的列（_grLinked 為其他 GR 號）
   const pickBest = (candidates: SheetContractData[]): SheetContractData => {
-    if (candidates.length === 1 || !emailDescription) return candidates[0]
-    let best = candidates[0]
+    // 排除已被其他合約明確認領的列
+    const available = grNumber
+      ? candidates.filter(r => !r._grLinked || r._grLinked.toUpperCase() === grNumber.toUpperCase())
+      : candidates
+    const pool = available.length > 0 ? available : candidates  // fallback to all if none available
+    if (pool.length === 1 || !emailDescription) return pool[0]
+    let best = pool[0]
     let bestScore = descScore(best.description, emailDescription)
-    for (let i = 1; i < candidates.length; i++) {
-      const s = descScore(candidates[i].description, emailDescription)
-      if (s > bestScore) { bestScore = s; best = candidates[i] }
+    for (let i = 1; i < pool.length; i++) {
+      const s = descScore(pool[i].description, emailDescription)
+      if (s > bestScore) { bestScore = s; best = pool[i] }
     }
     return best
   }
@@ -251,4 +287,67 @@ function stripCompanySuffix(name: string): string {
     .replace(/股份有限公司|有限公司|股份公司|分公司|台灣分公司|台北分公司|日商|美商|韓商|英商/g, '')
     .replace(/\s+/g, '')
     .trim()
+}
+
+// Convert 0-based column index to A1 letter (0→A, 25→Z, 26→AA, etc.)
+function colIndexToLetter(idx: number): string {
+  let result = ''
+  let n = idx + 1
+  while (n > 0) {
+    const rem = (n - 1) % 26
+    result = String.fromCharCode(65 + rem) + result
+    n = Math.floor((n - 1) / 26)
+  }
+  return result
+}
+
+export async function writeGrNumberToSheet(
+  accessToken: string,
+  matched: SheetContractData,
+  grNumber: string,
+): Promise<void> {
+  // Only proceed if we have the metadata and the row doesn't already have this GR
+  if (!matched._spreadsheetId || !matched._sheetTitle || matched._rowIndex === undefined) return
+  if (matched._grLinked === grNumber) return  // already correct, skip
+  if (matched._grLinked && matched._grLinked !== grNumber) return  // belongs to another GR, don't overwrite
+
+  const sheets = createSheetsClient(accessToken)
+  const spreadsheetId = matched._spreadsheetId
+  const sheetTitle = matched._sheetTitle
+  const rowIndex = matched._rowIndex  // already the spreadsheet row number (1-based, accounting for header)
+
+  try {
+    const headerRes = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetTitle}!1:1`,
+    })
+    const headers = (headerRes.data.values?.[0] || []).map(String)
+    let grColIdx = headers.findIndex(h => /GR|GR.?編號|GR.?number/i.test(h))
+
+    if (grColIdx < 0) {
+      // No GR column — append one at the end
+      grColIdx = headers.length  // 0-based index for the new column
+      const colLetter = colIndexToLetter(grColIdx)
+      // Write header
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetTitle}!${colLetter}1`,
+        valueInputOption: 'RAW',
+        requestBody: { values: [['GR 編號']] },
+      })
+    }
+
+    // Write GR number to the matched row
+    const colLetter = colIndexToLetter(grColIdx)
+    const cellRange = `${sheetTitle}!${colLetter}${rowIndex}`
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: cellRange,
+      valueInputOption: 'RAW',
+      requestBody: { values: [[grNumber]] },
+    })
+    console.log(`[Sheets] 回寫 GR ${grNumber} → ${sheetTitle} 第 ${rowIndex} 列 ${colLetter}${rowIndex}`)
+  } catch (err) {
+    console.error('[Sheets] 回寫 GR 失敗:', String(err))
+  }
 }
