@@ -1,4 +1,5 @@
 import NextAuth from 'next-auth'
+import { getServerSession, type NextAuthOptions } from 'next-auth'
 import GoogleProvider from 'next-auth/providers/google'
 import type { JWT } from 'next-auth/jwt'
 
@@ -29,7 +30,7 @@ async function refreshAccessToken(token: JWT): Promise<JWT> {
   }
 }
 
-export const { handlers, auth, signIn, signOut } = NextAuth({
+export const authOptions: NextAuthOptions = {
   providers: [
     GoogleProvider({
       clientId: process.env.GOOGLE_CLIENT_ID!,
@@ -51,7 +52,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   callbacks: {
     async signIn({ user }) {
       const domain = (user.email || '').split('@')[1]
-      return ALLOWED_DOMAINS.includes(domain)
+      return Boolean(domain && ALLOWED_DOMAINS.includes(domain))
     },
     async jwt({ token, account }) {
       if (account) {
@@ -76,4 +77,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
   },
   pages: { signIn: '/login', error: '/login' },
-})
+}
+
+export const handlers = NextAuth(authOptions)
+
+export function auth() {
+  return getServerSession(authOptions)
+}

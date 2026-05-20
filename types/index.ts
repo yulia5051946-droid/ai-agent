@@ -34,9 +34,11 @@ export interface Contract {
   ourProvisions?: string
   theirProvisions?: string
   sponsorAmountNTD?: string
+  sponsorAmountUSD?: string
   cooperationPeriod?: string
   responsiblePerson?: string
   legalProgressNote?: string
+  sheetLinkMode?: 'auto' | 'manual'
   notes?: { content: string; author: string; createdAt: string }[]
 }
 
@@ -114,9 +116,11 @@ export interface ContractCache {
   ourProvisions: string | null
   theirProvisions: string | null
   sponsorAmountNTD: string | null
+  sponsorAmountUSD: string | null
   cooperationPeriod: string | null
   responsiblePerson: string | null
   legalProgressNote: string | null
+  sheetLinkMode?: 'auto' | 'manual'
 }
 
 export interface ManualLock {

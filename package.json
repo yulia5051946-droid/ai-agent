@@ -3,9 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "ts-node --project tsconfig.server.json server.ts",
+    "dev": "next dev",
     "build": "next build",
-    "start": "ts-node --project tsconfig.server.json server.ts",
+    "start": "next start",
+    "custom:dev": "ts-node --project tsconfig.server.json server.ts",
+    "custom:start": "ts-node --project tsconfig.server.json server.ts",
     "next:dev": "next dev",
     "lint": "next lint"
   },

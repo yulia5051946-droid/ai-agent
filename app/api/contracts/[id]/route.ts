@@ -49,7 +49,9 @@ export async function GET(
     const gameSheetData = effectiveGame !== 'unknown'
       ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === effectiveGame)))
       : allSheetData
-    const found = matchSheetData(cached?.partner || '', gameSheetData, extractDescription(thread.subject), grNumber)
+    const found = cached?.sheetLinkMode === 'manual'
+      ? null
+      : matchSheetData(cached?.partner || '', gameSheetData, extractDescription(thread.subject), grNumber)
     if (found) {
       sheetData = found
       if (found._grLinked !== grNumber) {
@@ -93,15 +95,17 @@ export async function GET(
           amount: invoice.amount || undefined,
         }
       : undefined,
-    description: analysis.description || undefined,
-    contractType: analysis.contractType || undefined,
-    exposureSeason: analysis.exposureSeason || undefined,
-    ourProvisions: analysis.ourProvisions || undefined,
-    theirProvisions: analysis.theirProvisions || undefined,
-    sponsorAmountNTD: analysis.sponsorAmountNTD || undefined,
-    cooperationPeriod: analysis.cooperationPeriod || undefined,
-    responsiblePerson: analysis.responsiblePerson || undefined,
+    description: cached?.description || sheetData?.description || analysis.description || undefined,
+    contractType: cached?.contractType || sheetData?.type || analysis.contractType || undefined,
+    exposureSeason: cached?.exposureSeason || sheetData?.exposureSeason || analysis.exposureSeason || undefined,
+    ourProvisions: cached?.ourProvisions || sheetData?.ourProvisions || analysis.ourProvisions || undefined,
+    theirProvisions: cached?.theirProvisions || sheetData?.theirProvisions || analysis.theirProvisions || undefined,
+    sponsorAmountNTD: cached?.sponsorAmountNTD || sheetData?.sponsorAmountNTD || analysis.sponsorAmountNTD || undefined,
+    sponsorAmountUSD: cached?.sponsorAmountUSD || sheetData?.sponsorAmountUSD || undefined,
+    cooperationPeriod: cached?.cooperationPeriod || sheetData?.cooperationPeriod || analysis.cooperationPeriod || undefined,
+    responsiblePerson: cached?.responsiblePerson || sheetData?.responsiblePerson || analysis.responsiblePerson || undefined,
     legalProgressNote: analysis.legalProgressNote || undefined,
+    sheetLinkMode: cached?.sheetLinkMode || 'auto',
   }
 
   return NextResponse.json(detail)
@@ -179,8 +183,10 @@ function buildDetailFromCache(
     ourProvisions: cached.ourProvisions || undefined,
     theirProvisions: cached.theirProvisions || undefined,
     sponsorAmountNTD: cached.sponsorAmountNTD || undefined,
+    sponsorAmountUSD: cached.sponsorAmountUSD || undefined,
     cooperationPeriod: cached.cooperationPeriod || undefined,
     responsiblePerson: cached.responsiblePerson || undefined,
     legalProgressNote: cached.legalProgressNote || undefined,
+    sheetLinkMode: cached.sheetLinkMode || 'auto',
   }
 }

@@ -26,6 +26,7 @@ export async function GET(request: Request) {
   if (!session?.accessToken) {
     return NextResponse.json({ error: '未授權' }, { status: 401 })
   }
+  const accessToken = session.accessToken
 
   const { searchParams } = new URL(request.url)
   const forceRefresh = searchParams.get('refresh') === 'true'
@@ -53,9 +54,9 @@ export async function GET(request: Request) {
   // Fetch fresh data from Gmail
   try {
     const [threads, invoiceMap, allSheetData] = await Promise.all([
-      fetchContractThreads(session.accessToken),
-      fetchInvoiceEmails(session.accessToken).catch(() => new Map()),
-      fetchAllSheetData(session.accessToken).catch(() => new Map<string, SheetContractData>()),
+      fetchContractThreads(accessToken),
+      fetchInvoiceEmails(accessToken).catch(() => new Map()),
+      fetchAllSheetData(accessToken).catch(() => new Map<string, SheetContractData[]>()),
     ])
 
     const sheetTotal = Array.from(allSheetData.values()).reduce((s, rows) => s + rows.length, 0)
@@ -111,11 +112,13 @@ export async function GET(request: Request) {
           const gameSheetData = effectiveGame !== 'unknown'
             ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === effectiveGame)))
             : allSheetData
-          const sheetData = matchSheetData(partner, gameSheetData, emailDesc, thread.grNumber)
+          const sheetData = existingCache?.sheetLinkMode === 'manual'
+            ? null
+            : matchSheetData(partner, gameSheetData, emailDesc, thread.grNumber)
 
           if (sheetData && thread.grNumber && sheetData._grLinked !== thread.grNumber) {
             // Fire and forget — don't await, don't block analysis
-            writeGrNumberToSheet(session.accessToken, sheetData, thread.grNumber).catch(err =>
+            writeGrNumberToSheet(accessToken, sheetData, thread.grNumber).catch(err =>
               console.error(`[Sheets] ${thread.grNumber} 回寫失敗:`, String(err))
             )
           }
@@ -156,6 +159,7 @@ export async function GET(request: Request) {
             ourProvisions: sheetData?.ourProvisions || null,
             theirProvisions: sheetData?.theirProvisions || null,
             sponsorAmountNTD: sheetData?.sponsorAmountNTD || null,
+            sponsorAmountUSD: sheetData?.sponsorAmountUSD || null,
             cooperationPeriod: sheetData?.cooperationPeriod || null,
             responsiblePerson: sheetData?.responsiblePerson || null,
             legalProgressNote: analysis.legalProgressNote,
@@ -221,9 +225,11 @@ function buildContractList(
       ourProvisions: item.ourProvisions || undefined,
       theirProvisions: item.theirProvisions || undefined,
       sponsorAmountNTD: item.sponsorAmountNTD || undefined,
+      sponsorAmountUSD: item.sponsorAmountUSD || undefined,
       cooperationPeriod: item.cooperationPeriod || undefined,
       responsiblePerson: item.responsiblePerson || undefined,
       legalProgressNote: item.legalProgressNote || undefined,
+      sheetLinkMode: item.sheetLinkMode || 'auto',
       notes: (notesMap.get(item.grNumber) || []).map(n => ({
         content: n.content,
         author: n.author,

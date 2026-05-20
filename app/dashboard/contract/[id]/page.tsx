@@ -263,7 +263,22 @@ export default function ContractDetailPage() {
             )}
 
             <hr className="my-4 border-gray-100" />
-            <SheetLinkPanel grNumber={id} sheetData={contract.sheetData} />
+            <SheetLinkPanel
+              grNumber={id}
+              sheetData={contract.sheetData}
+              sheetLinkMode={contract.sheetLinkMode}
+              initialManualData={{
+                description: contract.description,
+                contractType: contract.contractType,
+                exposureSeason: contract.exposureSeason,
+                ourProvisions: contract.ourProvisions,
+                theirProvisions: contract.theirProvisions,
+                sponsorAmountNTD: contract.sponsorAmountNTD,
+                sponsorAmountUSD: contract.sponsorAmountUSD,
+                cooperationPeriod: contract.cooperationPeriod,
+                responsiblePerson: contract.responsiblePerson,
+              }}
+            />
           </div>
 
           {/* Timeline */}
@@ -564,16 +579,34 @@ interface SheetCandidate {
   isLinkedToThis: boolean
 }
 
+interface ManualResourceData {
+  description?: string | null
+  contractType?: string | null
+  exposureSeason?: string | null
+  ourProvisions?: string | null
+  theirProvisions?: string | null
+  sponsorAmountNTD?: string | null
+  sponsorAmountUSD?: string | null
+  cooperationPeriod?: string | null
+  responsiblePerson?: string | null
+}
+
 function SheetLinkPanel({
   grNumber,
   sheetData,
+  sheetLinkMode,
+  initialManualData,
 }: {
   grNumber: string
   sheetData?: { description?: string; type?: string; responsiblePerson?: string; exposureSeason?: string; sponsorAmountNTD?: string; sponsorAmountUSD?: string; ourProvisions?: string; theirProvisions?: string; } | null
+  sheetLinkMode?: 'auto' | 'manual'
+  initialManualData: ManualResourceData
 }) {
   const [open, setOpen] = useState(false)
   const [candidates, setCandidates] = useState<SheetCandidate[]>([])
   const [contractGame, setContractGame] = useState('')
+  const [mode, setMode] = useState<'auto' | 'manual'>(sheetLinkMode || 'auto')
+  const [manualForm, setManualForm] = useState<ManualResourceData>(initialManualData)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedKey, setSavedKey] = useState<string | null>(null)
@@ -585,10 +618,12 @@ function SheetLinkPanel({
     setError('')
     try {
       const res = await fetch(`/api/contracts/${grNumber}/sheet-link`)
-      const data = await res.json() as { candidates?: SheetCandidate[]; contractGame?: string; error?: string }
+      const data = await res.json() as { candidates?: SheetCandidate[]; contractGame?: string; sheetLinkMode?: 'auto' | 'manual'; manualData?: ManualResourceData | null; error?: string }
       if (data.error) throw new Error(data.error)
       setCandidates(data.candidates || [])
       setContractGame(data.contractGame || '')
+      if (data.sheetLinkMode) setMode(data.sheetLinkMode)
+      if (data.manualData) setManualForm(data.manualData)
     } catch (e) {
       setError(e instanceof Error ? e.message : '讀取失敗')
     } finally {
@@ -613,6 +648,7 @@ function SheetLinkPanel({
       const data = await res.json() as { success?: boolean; error?: string }
       if (data.error) throw new Error(data.error)
       setSavedKey(rowKey)
+      setMode('auto')
       setOpen(false)
       // Update local candidates to reflect new link
       setCandidates(prev => prev.map(c => ({
@@ -627,6 +663,27 @@ function SheetLinkPanel({
     }
   }
 
+  const handleManualSave = async () => {
+    setSaving(true)
+    setError('')
+    try {
+      const res = await fetch(`/api/contracts/${grNumber}/sheet-link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'manual', data: manualForm }),
+      })
+      const data = await res.json() as { success?: boolean; error?: string }
+      if (data.error) throw new Error(data.error)
+      setMode('manual')
+      setSavedKey(null)
+      setOpen(false)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '儲存失敗')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const filtered = search.trim()
     ? candidates.filter(c =>
         [c.partner, c.description, c.type, c.exposureSeason, c.responsiblePerson]
@@ -635,12 +692,16 @@ function SheetLinkPanel({
     : candidates
 
   const linkedCandidate = candidates.find(c => c.isLinkedToThis)
+  const hasManualContent = Object.values(manualForm).some(v => typeof v === 'string' && v.trim())
 
   return (
     <div>
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium text-gray-700">
           試算表資料
+          {mode === 'manual' && (
+            <span className="ml-2 text-xs text-amber-600 font-normal">不連結表格</span>
+          )}
           {(linkedCandidate || savedKey) && (
             <span className="ml-2 text-xs text-emerald-600 font-normal">✓ 已連結</span>
           )}
@@ -654,7 +715,23 @@ function SheetLinkPanel({
       </div>
 
       {/* Current match preview */}
-      {sheetData ? (
+      {mode === 'manual' ? (
+        hasManualContent ? (
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+            <InfoItem label="內容簡述" value={manualForm.description} />
+            <InfoItem label="合作類型" value={manualForm.contractType} />
+            <InfoItem label="我方提供" value={manualForm.ourProvisions} />
+            <InfoItem label="對方提供" value={manualForm.theirProvisions} />
+            {manualForm.sponsorAmountNTD && <InfoItem label="贊助金額 NTD" value={manualForm.sponsorAmountNTD} />}
+            {manualForm.sponsorAmountUSD && <InfoItem label="贊助金額 USD" value={manualForm.sponsorAmountUSD} />}
+            <InfoItem label="合作時間" value={manualForm.cooperationPeriod} />
+            <InfoItem label="露出賽季" value={manualForm.exposureSeason} />
+            <InfoItem label="負責人" value={manualForm.responsiblePerson} />
+          </dl>
+        ) : (
+          <p className="text-sm text-amber-600">此合約設定為不連結表格，尚未填寫資源內容</p>
+        )
+      ) : sheetData ? (
         <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
           <InfoItem label="內容簡述" value={sheetData.description} />
           <InfoItem label="合作類型" value={sheetData.type} />
@@ -692,6 +769,33 @@ function SheetLinkPanel({
                 className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-300"
                 autoFocus
               />
+            </div>
+
+            <div className="px-5 py-3 border-b border-gray-100 bg-amber-50/60">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-medium text-amber-800">不連結表格</p>
+                  <p className="text-xs text-amber-700 mt-0.5">適用沒有 Sheet 列的合約，資源內容改由下方手動維護，後續同步不會覆蓋。</p>
+                </div>
+                <button
+                  onClick={() => setMode('manual')}
+                  className={`text-xs rounded px-3 py-1.5 border transition-colors ${
+                    mode === 'manual'
+                      ? 'bg-amber-500 border-amber-500 text-white'
+                      : 'bg-white border-amber-200 text-amber-700 hover:bg-amber-100'
+                  }`}
+                >
+                  使用手動內容
+                </button>
+              </div>
+              {mode === 'manual' && (
+                <ManualResourceForm
+                  value={manualForm}
+                  onChange={setManualForm}
+                  onSave={handleManualSave}
+                  saving={saving}
+                />
+              )}
             </div>
 
             <div className="overflow-y-auto flex-1 px-2 py-2">
@@ -753,6 +857,74 @@ function SheetLinkPanel({
         </div>
       )}
     </div>
+  )
+}
+
+function ManualResourceForm({
+  value,
+  onChange,
+  onSave,
+  saving,
+}: {
+  value: ManualResourceData
+  onChange: (value: ManualResourceData) => void
+  onSave: () => void
+  saving: boolean
+}) {
+  const setField = (key: keyof ManualResourceData, fieldValue: string) => {
+    onChange({ ...value, [key]: fieldValue })
+  }
+
+  return (
+    <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <ManualInput label="內容簡述" value={value.description} onChange={v => setField('description', v)} />
+      <ManualInput label="合作類型" value={value.contractType} onChange={v => setField('contractType', v)} />
+      <ManualInput label="合作時間" value={value.cooperationPeriod} onChange={v => setField('cooperationPeriod', v)} />
+      <ManualInput label="露出賽季" value={value.exposureSeason} onChange={v => setField('exposureSeason', v)} />
+      <ManualInput label="贊助金額 NTD" value={value.sponsorAmountNTD} onChange={v => setField('sponsorAmountNTD', v)} />
+      <ManualInput label="贊助金額 USD" value={value.sponsorAmountUSD} onChange={v => setField('sponsorAmountUSD', v)} />
+      <ManualInput label="負責人" value={value.responsiblePerson} onChange={v => setField('responsiblePerson', v)} />
+      <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <ManualTextarea label="我方提供" value={value.ourProvisions} onChange={v => setField('ourProvisions', v)} />
+        <ManualTextarea label="對方提供" value={value.theirProvisions} onChange={v => setField('theirProvisions', v)} />
+      </div>
+      <div className="sm:col-span-2 flex justify-end">
+        <button
+          onClick={onSave}
+          disabled={saving}
+          className="btn-primary text-sm disabled:opacity-50"
+        >
+          {saving ? '儲存中...' : '儲存手動內容'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ManualInput({ label, value, onChange }: { label: string; value?: string | null; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-gray-500 mb-1">{label}</span>
+      <input
+        value={value || ''}
+        onChange={e => onChange(e.target.value)}
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white"
+      />
+    </label>
+  )
+}
+
+function ManualTextarea({ label, value, onChange }: { label: string; value?: string | null; onChange: (value: string) => void }) {
+  return (
+    <label className="block">
+      <span className="block text-xs text-gray-500 mb-1">{label}</span>
+      <textarea
+        value={value || ''}
+        onChange={e => onChange(e.target.value)}
+        rows={3}
+        className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-300 bg-white resize-none"
+      />
+    </label>
   )
 }
 

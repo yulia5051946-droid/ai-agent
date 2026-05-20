@@ -5,7 +5,7 @@ import { analyzeContractThread, extractDescription } from '@/lib/claude'
 import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
 import { upsertContractCache, getContractCache, getAllTeamMembers, isBDMember } from '@/lib/db'
 import { extractLatestContractVersion, extractAppliedDate, detectFinanceInfo } from '@/lib/gmail'
-import type { ContractStatus, GameType } from '@/types'
+import type { ContractStatus, GameType, SheetContractData } from '@/types'
 
 function detectGame(subject: string): GameType {
   if (/\bAOV\b|傳說對決|Arena of Valor/i.test(subject)) return 'AOV'
@@ -70,7 +70,7 @@ export async function POST(request: Request) {
     const detectedGame = detectGame(thread.subject)
 
     // Sheet 比對
-    let sheetData = null
+    let sheetData: SheetContractData | null = null
     try {
       const allSheetData = await fetchAllSheetData(session.accessToken)
       const gameSheetData = detectedGame !== 'unknown'
@@ -107,6 +107,7 @@ export async function POST(request: Request) {
       ourProvisions: sheetData?.ourProvisions || null,
       theirProvisions: sheetData?.theirProvisions || null,
       sponsorAmountNTD: sheetData?.sponsorAmountNTD || null,
+      sponsorAmountUSD: sheetData?.sponsorAmountUSD || null,
       cooperationPeriod: sheetData?.cooperationPeriod || null,
       responsiblePerson: sheetData?.responsiblePerson || null,
       legalProgressNote: analysis.legalProgressNote,

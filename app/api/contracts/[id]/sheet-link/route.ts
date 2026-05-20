@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { fetchAllSheetData, writeGrNumberToSheet } from '@/lib/sheets'
-import { getContractCache } from '@/lib/db'
+import { getContractCache, setAutoSheetLinkMode, setManualResourceData } from '@/lib/db'
 import type { SheetContractData } from '@/types'
 
 // rowKey 格式：spreadsheetId::sheetTitle::rowIndex
@@ -89,11 +89,27 @@ export async function GET(
     return aGame - bGame
   })
 
-  return NextResponse.json({ candidates, contractGame })
+  return NextResponse.json({
+    candidates,
+    contractGame,
+    sheetLinkMode: cached?.sheetLinkMode || 'auto',
+    manualData: cached ? {
+      description: cached.description,
+      contractType: cached.contractType,
+      exposureSeason: cached.exposureSeason,
+      ourProvisions: cached.ourProvisions,
+      theirProvisions: cached.theirProvisions,
+      sponsorAmountNTD: cached.sponsorAmountNTD,
+      sponsorAmountUSD: cached.sponsorAmountUSD,
+      cooperationPeriod: cached.cooperationPeriod,
+      responsiblePerson: cached.responsiblePerson,
+    } : null,
+  })
 }
 
 // POST /api/contracts/[id]/sheet-link
-// body: { rowKey: string }  → 強制把這個合約的 GR 寫到指定 sheet 列
+// body: { rowKey: string } → 強制把這個合約的 GR 寫到指定 sheet 列
+// body: { action: 'manual', data: {...} } → 不連結 Sheet，改用手動資源內容
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -106,7 +122,46 @@ export async function POST(
   const { id } = await params
   const grNumber = id.toUpperCase()
 
-  const body = await request.json() as { rowKey?: string }
+  const body = await request.json() as {
+    rowKey?: string
+    action?: 'manual'
+    data?: {
+      description?: string
+      contractType?: string
+      exposureSeason?: string
+      ourProvisions?: string
+      theirProvisions?: string
+      sponsorAmountNTD?: string
+      sponsorAmountUSD?: string
+      cooperationPeriod?: string
+      responsiblePerson?: string
+    }
+  }
+
+  if (body.action === 'manual') {
+    const data = body.data || {}
+    const clean = (value: string | undefined) => {
+      const trimmed = value?.trim()
+      return trimmed ? trimmed : null
+    }
+    try {
+      setManualResourceData(grNumber, {
+        description: clean(data.description),
+        contractType: clean(data.contractType),
+        exposureSeason: clean(data.exposureSeason),
+        ourProvisions: clean(data.ourProvisions),
+        theirProvisions: clean(data.theirProvisions),
+        sponsorAmountNTD: clean(data.sponsorAmountNTD),
+        sponsorAmountUSD: clean(data.sponsorAmountUSD),
+        cooperationPeriod: clean(data.cooperationPeriod),
+        responsiblePerson: clean(data.responsiblePerson),
+      })
+      return NextResponse.json({ success: true, grNumber, sheetLinkMode: 'manual' })
+    } catch (err) {
+      return NextResponse.json({ error: String(err) }, { status: 500 })
+    }
+  }
+
   if (!body.rowKey) {
     return NextResponse.json({ error: '缺少 rowKey' }, { status: 400 })
   }
@@ -130,6 +185,7 @@ export async function POST(
 
   try {
     await writeGrNumberToSheet(session.accessToken, fakeRow, grNumber)
+    setAutoSheetLinkMode(grNumber)
     return NextResponse.json({ success: true, grNumber, rowKey: body.rowKey })
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 })

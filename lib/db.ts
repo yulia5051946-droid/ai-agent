@@ -47,9 +47,11 @@ function initSchema(database: Database.Database) {
       our_provisions TEXT,
       their_provisions TEXT,
       sponsor_amount_ntd TEXT,
+      sponsor_amount_usd TEXT,
       cooperation_period TEXT,
       responsible_person TEXT,
       legal_progress_note TEXT,
+      sheet_link_mode TEXT DEFAULT 'auto',
       game_manual INTEGER DEFAULT 0
     );
 
@@ -123,9 +125,11 @@ function runMigrations(database: Database.Database) {
     ['our_provisions', 'TEXT'],
     ['their_provisions', 'TEXT'],
     ['sponsor_amount_ntd', 'TEXT'],
+    ['sponsor_amount_usd', 'TEXT'],
     ['cooperation_period', 'TEXT'],
     ['responsible_person', 'TEXT'],
     ['legal_progress_note', 'TEXT'],
+    ['sheet_link_mode', "TEXT DEFAULT 'auto'"],
     ['game_manual', 'INTEGER DEFAULT 0'],
   ]
   for (const [col, type] of contractCacheCols) {
@@ -149,13 +153,13 @@ export function upsertContractCache(data: ContractCache): void {
       status, responsible_legal, has_auth_letter, contract_version,
       finance_confirmed, next_action, summary, updated_at,
       description, contract_type, exposure_season, our_provisions, their_provisions,
-      sponsor_amount_ntd, cooperation_period, responsible_person, legal_progress_note
+      sponsor_amount_ntd, sponsor_amount_usd, cooperation_period, responsible_person, legal_progress_note
     ) VALUES (
       @grNumber, @threadId, @game, @gameManual, @partner, @subject, @appliedAt, @lastEmailAt,
       @status, @responsibleLegal, @hasAuthorizationLetter, @contractVersion,
       @financeConfirmed, @nextAction, @summary, @updatedAt,
       @description, @contractType, @exposureSeason, @ourProvisions, @theirProvisions,
-      @sponsorAmountNTD, @cooperationPeriod, @responsiblePerson, @legalProgressNote
+      @sponsorAmountNTD, @sponsorAmountUSD, @cooperationPeriod, @responsiblePerson, @legalProgressNote
     )
     ON CONFLICT(gr_number) DO UPDATE SET
       thread_id = excluded.thread_id,
@@ -172,14 +176,15 @@ export function upsertContractCache(data: ContractCache): void {
       next_action = excluded.next_action,
       summary = excluded.summary,
       updated_at = excluded.updated_at,
-      description = excluded.description,
-      contract_type = excluded.contract_type,
-      exposure_season = excluded.exposure_season,
-      our_provisions = excluded.our_provisions,
-      their_provisions = excluded.their_provisions,
-      sponsor_amount_ntd = excluded.sponsor_amount_ntd,
-      cooperation_period = excluded.cooperation_period,
-      responsible_person = excluded.responsible_person,
+      description = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.description ELSE excluded.description END,
+      contract_type = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.contract_type ELSE excluded.contract_type END,
+      exposure_season = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.exposure_season ELSE excluded.exposure_season END,
+      our_provisions = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.our_provisions ELSE excluded.our_provisions END,
+      their_provisions = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.their_provisions ELSE excluded.their_provisions END,
+      sponsor_amount_ntd = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.sponsor_amount_ntd ELSE excluded.sponsor_amount_ntd END,
+      sponsor_amount_usd = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.sponsor_amount_usd ELSE excluded.sponsor_amount_usd END,
+      cooperation_period = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.cooperation_period ELSE excluded.cooperation_period END,
+      responsible_person = CASE WHEN contract_cache.sheet_link_mode = 'manual' THEN contract_cache.responsible_person ELSE excluded.responsible_person END,
       legal_progress_note = excluded.legal_progress_note
   `).run({
     grNumber: data.grNumber,
@@ -204,6 +209,7 @@ export function upsertContractCache(data: ContractCache): void {
     ourProvisions: data.ourProvisions,
     theirProvisions: data.theirProvisions,
     sponsorAmountNTD: data.sponsorAmountNTD,
+    sponsorAmountUSD: data.sponsorAmountUSD,
     cooperationPeriod: data.cooperationPeriod,
     responsiblePerson: data.responsiblePerson,
     legalProgressNote: data.legalProgressNote,
@@ -237,6 +243,47 @@ export function setManualLock(lock: ManualLock): void {
 export function setManualGame(grNumber: string, game: string): void {
   const database = getDb()
   database.prepare('UPDATE contract_cache SET game = ?, game_manual = 1 WHERE gr_number = ?').run(game, grNumber)
+}
+
+export function setManualResourceData(
+  grNumber: string,
+  data: {
+    description: string | null
+    contractType: string | null
+    exposureSeason: string | null
+    ourProvisions: string | null
+    theirProvisions: string | null
+    sponsorAmountNTD: string | null
+    sponsorAmountUSD: string | null
+    cooperationPeriod: string | null
+    responsiblePerson: string | null
+  }
+): void {
+  const database = getDb()
+  database.prepare(`
+    UPDATE contract_cache SET
+      sheet_link_mode = 'manual',
+      description = @description,
+      contract_type = @contractType,
+      exposure_season = @exposureSeason,
+      our_provisions = @ourProvisions,
+      their_provisions = @theirProvisions,
+      sponsor_amount_ntd = @sponsorAmountNTD,
+      sponsor_amount_usd = @sponsorAmountUSD,
+      cooperation_period = @cooperationPeriod,
+      responsible_person = @responsiblePerson,
+      updated_at = @updatedAt
+    WHERE gr_number = @grNumber
+  `).run({
+    grNumber,
+    ...data,
+    updatedAt: new Date().toISOString(),
+  })
+}
+
+export function setAutoSheetLinkMode(grNumber: string): void {
+  const database = getDb()
+  database.prepare("UPDATE contract_cache SET sheet_link_mode = 'auto', updated_at = ? WHERE gr_number = ?").run(new Date().toISOString(), grNumber)
 }
 
 export function removeManualLock(grNumber: string): void {
@@ -334,9 +381,11 @@ function rowToCache(row: Record<string, unknown>): ContractCache {
     ourProvisions: row.our_provisions as string | null,
     theirProvisions: row.their_provisions as string | null,
     sponsorAmountNTD: row.sponsor_amount_ntd as string | null,
+    sponsorAmountUSD: row.sponsor_amount_usd as string | null,
     cooperationPeriod: row.cooperation_period as string | null,
     responsiblePerson: row.responsible_person as string | null,
     legalProgressNote: row.legal_progress_note as string | null,
+    sheetLinkMode: (row.sheet_link_mode as 'auto' | 'manual' | null) || 'auto',
   }
 }
 
