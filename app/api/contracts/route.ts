@@ -1,9 +1,6 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
-import { fetchContractThreads, fetchInvoiceEmails, extractLatestContractVersion, extractAppliedDate, detectFinanceInfo } from '@/lib/gmail'
-import { analyzeContractThread, extractDescription } from '@/lib/claude'
 import { upsertContractCache, getAllContractCache, getAllManualLocks, upsertInvoiceRecord, getLegalNotesMap, getAllTeamMembers, isBDMember } from '@/lib/db'
-import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
 import type { Contract, ContractStatus, GameType, SheetContractData } from '@/types'
 
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
@@ -35,40 +32,45 @@ export async function GET(request: Request) {
   const cached = getAllContractCache()
   const manualLocks = getAllManualLocks()
 
-  // 只有 BD 成員可以觸發 Gmail 同步；非 BD 直接回快取
-  if (forceRefresh && !isBDMember(session.user?.email || '')) {
+  // Keep the normal dashboard load lightweight on low-memory deployments.
+  // Gmail/Sheets/Claude modules are imported only for an explicit sync.
+  if (!forceRefresh) {
     return NextResponse.json(buildContractList(cached, manualLocks))
   }
 
-  if (!forceRefresh && cached.length > 0) {
-    const mostRecentUpdate = cached.reduce((latest, c) => {
-      return new Date(c.updatedAt) > new Date(latest) ? c.updatedAt : latest
-    }, cached[0].updatedAt)
-
-    const age = Date.now() - new Date(mostRecentUpdate).getTime()
-    if (age < CACHE_TTL_MS) {
-      return NextResponse.json(buildContractList(cached, manualLocks))
-    }
+  // 只有 BD 成員可以觸發 Gmail 同步；非 BD 直接回快取
+  if (!isBDMember(session.user?.email || '')) {
+    return NextResponse.json(buildContractList(cached, manualLocks))
   }
 
   // Fetch fresh data from Gmail
   try {
+    const [
+      gmail,
+      claude,
+      sheets,
+    ] = await Promise.all([
+      import('@/lib/gmail'),
+      import('@/lib/claude'),
+      import('@/lib/sheets'),
+    ])
+
     const [threads, invoiceMap, allSheetData] = await Promise.all([
-      fetchContractThreads(accessToken),
-      fetchInvoiceEmails(accessToken).catch(() => new Map()),
-      fetchAllSheetData(accessToken).catch(() => new Map<string, SheetContractData[]>()),
+      gmail.fetchContractThreads(accessToken),
+      gmail.fetchInvoiceEmails(accessToken).catch(() => new Map()),
+      sheets.fetchAllSheetData(accessToken).catch(() => new Map<string, SheetContractData[]>()),
     ])
 
     const sheetTotal = Array.from(allSheetData.values()).reduce((s, rows) => s + rows.length, 0)
     console.log(`[Contracts] 找到 ${threads.length} 個 thread，Sheet 資料 ${sheetTotal} 筆（${allSheetData.size} 家廠商）`)
     threads.forEach(t => {
       const partner = extractPartnerFromSubject(t.subject)
-      const desc = extractDescription(t.subject)
+      const desc = claude.extractDescription(t.subject)
       const game = detectGame(t.subject)
       const filtered = game !== 'unknown'
         ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === game)))
         : allSheetData
-      const matched = matchSheetData(partner, filtered, desc, t.grNumber)
+      const matched = sheets.matchSheetData(partner, filtered, desc, t.grNumber)
       if (!matched) console.log(`[Sheets] 未比對 ${t.grNumber}(${game}): 廠商「${partner}」`)
       else console.log(`[Sheets] 比對到 ${t.grNumber}(${game}): 廠商「${partner}」→「${matched.partner}」`)
     })
@@ -90,14 +92,14 @@ export async function GET(request: Request) {
     const analysisResults = await Promise.allSettled(
       threads.map(async thread => {
         try {
-          const analysis = await analyzeContractThread(thread, teamMembers)
+          const analysis = await claude.analyzeContractThread(thread, teamMembers)
           const lastMsg = thread.messages[thread.messages.length - 1]
-          const contractVersion = extractLatestContractVersion(thread.messages)
-          const appliedAt = extractAppliedDate(thread.messages)
-          const financeInfo = detectFinanceInfo(thread.messages)
+          const contractVersion = gmail.extractLatestContractVersion(thread.messages)
+          const appliedAt = gmail.extractAppliedDate(thread.messages)
+          const financeInfo = gmail.detectFinanceInfo(thread.messages)
 
           const partner = extractPartnerFromSubject(thread.subject)
-          const emailDesc = extractDescription(thread.subject)
+          const emailDesc = claude.extractDescription(thread.subject)
           const existingCache = cached.find(c => c.grNumber === thread.grNumber)
 
           // 決定有效遊戲：手動設定 > subject 偵測 > cache 舊值
@@ -114,11 +116,11 @@ export async function GET(request: Request) {
             : allSheetData
           const sheetData = existingCache?.sheetLinkMode === 'manual'
             ? null
-            : matchSheetData(partner, gameSheetData, emailDesc, thread.grNumber)
+            : sheets.matchSheetData(partner, gameSheetData, emailDesc, thread.grNumber)
 
           if (sheetData && thread.grNumber && sheetData._grLinked !== thread.grNumber) {
             // Fire and forget — don't await, don't block analysis
-            writeGrNumberToSheet(accessToken, sheetData, thread.grNumber).catch(err =>
+            sheets.writeGrNumberToSheet(accessToken, sheetData, thread.grNumber).catch(err =>
               console.error(`[Sheets] ${thread.grNumber} 回寫失敗:`, String(err))
             )
           }
