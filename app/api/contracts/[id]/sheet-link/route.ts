@@ -1,8 +1,16 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
-import { fetchAllSheetData, writeGrNumberToSheet } from '@/lib/sheets'
+import { fetchAllSheetData, filterSheetDataByGame, writeGrNumberToSheet } from '@/lib/sheets'
 import { addActivityLog, getContractCache, setAutoSheetLinkMode, setManualResourceData } from '@/lib/db'
-import type { SheetContractData } from '@/types'
+import type { GameType, SheetContractData } from '@/types'
+
+function detectGame(subject: string | null | undefined): GameType {
+  if (!subject) return 'unknown'
+  if (/\bAOV\b|傳說對決|Arena of Valor/i.test(subject)) return 'AOV'
+  if (/\bCODM\b|使命召喚/i.test(subject)) return 'CODM'
+  if (/\bDF\b|決鬥|Undawn/i.test(subject)) return 'DF'
+  return 'unknown'
+}
 
 // rowKey 格式：spreadsheetId::sheetTitle::rowIndex
 function encodeRowKey(row: SheetContractData): string | null {
@@ -56,7 +64,14 @@ export async function GET(
     isLinkedToThis: boolean
   }[] = []
 
-  for (const rows of allSheetData.values()) {
+  const cached = getContractCache(grNumber)
+  const detectedGame = detectGame(cached?.subject)
+  const contractGame = (detectedGame !== 'unknown' ? detectedGame : (cached?.game || 'unknown')) as GameType
+  const visibleSheetData = contractGame === 'unknown'
+    ? allSheetData
+    : filterSheetDataByGame(allSheetData, contractGame)
+
+  for (const rows of visibleSheetData.values()) {
     for (const row of rows) {
       const key = encodeRowKey(row)
       if (!key || seen.has(key)) continue
@@ -77,9 +92,6 @@ export async function GET(
   }
 
   // 優先顯示：同遊戲、尚未被其他 GR 認領、或已連結到本合約
-  const cached = getContractCache(grNumber)
-  const contractGame = cached?.game || 'unknown'
-
   candidates.sort((a, b) => {
     const aLinked = a.isLinkedToThis ? -2 : (a.currentGr ? 1 : 0)
     const bLinked = b.isLinkedToThis ? -2 : (b.currentGr ? 1 : 0)

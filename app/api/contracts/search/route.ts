@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
-import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
+import { fetchAllSheetData, filterSheetDataByGame, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
 import { upsertContractCache, getContractCache, getAllTeamMembers, isBDMember } from '@/lib/db'
 import { extractLatestContractVersion, extractAppliedDate, detectFinanceInfo } from '@/lib/gmail'
 import type { ContractStatus, GameType, SheetContractData } from '@/types'
@@ -73,9 +73,7 @@ export async function POST(request: Request) {
     let sheetData: SheetContractData | null = null
     try {
       const allSheetData = await fetchAllSheetData(session.accessToken)
-      const gameSheetData = detectedGame !== 'unknown'
-        ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === detectedGame)))
-        : allSheetData
+      const gameSheetData = filterSheetDataByGame(allSheetData, detectedGame)
       sheetData = matchSheetData(partner, gameSheetData, emailDesc, grNumber)
       if (sheetData && sheetData._grLinked !== grNumber) {
         writeGrNumberToSheet(session.accessToken, sheetData, grNumber).catch(() => {})

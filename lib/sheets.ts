@@ -60,6 +60,21 @@ export async function fetchAllSheetData(accessToken: string): Promise<Map<string
   return results
 }
 
+export function filterSheetDataByGame(
+  allSheetData: Map<string, SheetContractData[]>,
+  game: GameType
+): Map<string, SheetContractData[]> {
+  const filtered = new Map<string, SheetContractData[]>()
+  if (game === 'unknown') return filtered
+
+  for (const [key, rows] of allSheetData.entries()) {
+    const gameRows = rows.filter(row => row.game === game)
+    if (gameRows.length > 0) filtered.set(key, gameRows)
+  }
+
+  return filtered
+}
+
 export async function fetchGameSheetData(
   accessToken: string,
   config: typeof SHEETS_CONFIG[keyof typeof SHEETS_CONFIG]

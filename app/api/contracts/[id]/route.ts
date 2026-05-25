@@ -2,9 +2,16 @@ import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
-import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
+import { fetchAllSheetData, filterSheetDataByGame, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
 import { addActivityLog, getContractCache, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, setManualGame } from '@/lib/db'
 import type { ContractDetail, ContractStatus, GameType } from '@/types'
+
+function detectGame(subject: string): GameType {
+  if (/\bAOV\b|傳說對決|Arena of Valor/i.test(subject)) return 'AOV'
+  if (/\bCODM\b|使命召喚/i.test(subject)) return 'CODM'
+  if (/\bDF\b|決鬥|Undawn/i.test(subject)) return 'DF'
+  return 'unknown'
+}
 
 export async function GET(
   request: Request,
@@ -43,12 +50,11 @@ export async function GET(
     // 手動設定的遊戲優先，避免 sheet 比對結果覆寫
     const cachedGame = cached?.game as GameType | undefined
     const gameManual = cached?.gameManual ?? false
+    const detectedGame = detectGame(thread.subject)
     const effectiveGame: GameType = gameManual
       ? (cachedGame ?? 'unknown')
-      : (cachedGame ?? 'unknown')
-    const gameSheetData = effectiveGame !== 'unknown'
-      ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === effectiveGame)))
-      : allSheetData
+      : (detectedGame !== 'unknown' ? detectedGame : (cachedGame ?? 'unknown'))
+    const gameSheetData = filterSheetDataByGame(allSheetData, effectiveGame)
     const found = cached?.sheetLinkMode === 'manual'
       ? null
       : matchSheetData(cached?.partner || '', gameSheetData, extractDescription(thread.subject), grNumber)

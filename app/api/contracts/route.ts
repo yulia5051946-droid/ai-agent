@@ -67,9 +67,7 @@ export async function GET(request: Request) {
       const partner = extractPartnerFromSubject(t.subject)
       const desc = claude.extractDescription(t.subject)
       const game = detectGame(t.subject)
-      const filtered = game !== 'unknown'
-        ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === game)))
-        : allSheetData
+      const filtered = sheets.filterSheetDataByGame(allSheetData, game)
       const matched = sheets.matchSheetData(partner, filtered, desc, t.grNumber)
       if (!matched) console.log(`[Sheets] 未比對 ${t.grNumber}(${game}): 廠商「${partner}」`)
       else console.log(`[Sheets] 比對到 ${t.grNumber}(${game}): 廠商「${partner}」→「${matched.partner}」`)
@@ -109,11 +107,8 @@ export async function GET(request: Request) {
             ? (existingCache!.game as GameType)
             : (detectedGame !== 'unknown' ? detectedGame : (existingCache?.game as GameType | undefined) ?? 'unknown')
 
-          // 只在有效遊戲的 Sheet 資料中比對，避免跨遊戲誤抓
-          // effectiveGame 為 unknown 才用全部（不擴大到 AOV 的列）
-          const gameSheetData = effectiveGame !== 'unknown'
-            ? new Map([...allSheetData.entries()].filter(([, rows]) => rows.some(r => r.game === effectiveGame)))
-            : allSheetData
+          // 只在有效遊戲的 Sheet 資料中比對，避免同廠商跨遊戲誤抓 AOV 列。
+          const gameSheetData = sheets.filterSheetDataByGame(allSheetData, effectiveGame)
           const sheetData = existingCache?.sheetLinkMode === 'manual'
             ? null
             : sheets.matchSheetData(partner, gameSheetData, emailDesc, thread.grNumber)
