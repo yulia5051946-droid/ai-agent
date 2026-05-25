@@ -400,43 +400,70 @@ function NotesPanel({ grNumber }: { grNumber: string }) {
 }
 
 function FilesPanel({ grNumber }: { grNumber: string }) {
-  const [files, setFiles] = useState<{ id: number; originalName: string; storedName: string; mimeType: string; size: number; uploadedBy: string; uploadedAt: string; driveFileId?: string; driveUrl?: string }[]>([])
+  type ContractFileItem = { id: number; originalName: string; storedName: string; mimeType: string; size: number; uploadedBy: string; uploadedAt: string; driveFileId?: string; driveUrl?: string }
+  type ActivityItem = { id: number; action: string; targetName: string | null; author: string; createdAt: string; details: string | null }
+  const [files, setFiles] = useState<ContractFileItem[]>([])
+  const [activities, setActivities] = useState<ActivityItem[]>([])
   const [uploading, setUploading] = useState(false)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ContractFileItem | null>(null)
+  const [fileError, setFileError] = useState('')
   const [driveStatus, setDriveStatus] = useState<Record<number, 'uploading' | 'done' | 'error'>>({})
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     fetch(`/api/contracts/${grNumber}/files`)
       .then(r => r.json())
-      .then(d => { if (d.files) setFiles(d.files) })
+      .then(d => {
+        if (d.files) setFiles(d.files)
+        if (d.activities) setActivities(d.activities)
+      })
   }, [grNumber])
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
     setUploading(true)
+    setFileError('')
     try {
       const form = new FormData()
       form.append('file', file)
       const res = await fetch(`/api/contracts/${grNumber}/files`, { method: 'POST', body: form })
-      const data = await res.json() as { file?: { id: number; originalName: string; storedName: string; mimeType: string; size: number; uploadedBy: string; uploadedAt: string; driveFileId?: string; driveUrl?: string }; error?: string }
+      const data = await res.json() as { file?: ContractFileItem; activity?: ActivityItem; error?: string }
+      if (!res.ok) throw new Error(data.error || '上傳失敗')
       if (data.file) {
         setFiles(prev => [data.file!, ...prev])
+        if (data.activity) setActivities(prev => [data.activity!, ...prev].slice(0, 30))
         if (data.file.driveUrl) {
           setDriveStatus(s => ({ ...s, [data.file!.id]: 'done' }))
         } else {
           setDriveStatus(s => ({ ...s, [data.file!.id]: 'error' }))
         }
       }
+    } catch (err) {
+      setFileError(err instanceof Error ? err.message : '上傳失敗')
     } finally {
       setUploading(false)
       if (inputRef.current) inputRef.current.value = ''
     }
   }
 
-  const handleDelete = async (fileId: number) => {
-    await fetch(`/api/contracts/${grNumber}/files/${fileId}`, { method: 'DELETE' })
-    setFiles(prev => prev.filter(f => f.id !== fileId))
+  const confirmDelete = async () => {
+    if (!deleteTarget) return
+    setDeletingId(deleteTarget.id)
+    setFileError('')
+    try {
+      const res = await fetch(`/api/contracts/${grNumber}/files/${deleteTarget.id}`, { method: 'DELETE' })
+      const data = await res.json() as { success?: boolean; activities?: ActivityItem[]; error?: string }
+      if (!res.ok) throw new Error(data.error || '刪除失敗')
+      setFiles(prev => prev.filter(f => f.id !== deleteTarget.id))
+      if (data.activities) setActivities(data.activities)
+      setDeleteTarget(null)
+    } catch (err) {
+      setFileError(err instanceof Error ? err.message : '刪除失敗')
+    } finally {
+      setDeletingId(null)
+    }
   }
 
   const formatSize = (bytes: number) => {
@@ -445,10 +472,31 @@ function FilesPanel({ grNumber }: { grNumber: string }) {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`
   }
 
+  const activityLabel = (item: ActivityItem) => {
+    const map: Record<string, string> = {
+      upload_file: '上傳用印文件',
+      delete_file: '刪除用印文件',
+      lock_status: '更新合約狀態',
+      unlock_status: '取消狀態鎖定',
+      set_game: '更新遊戲項目',
+      manual_resource: '更新手動資源內容',
+      link_sheet: '更新 Sheet 對應列',
+      add_note: '新增備註',
+      delete_note: '刪除備註',
+    }
+    return map[item.action] || item.action
+  }
+
   return (
     <div className="card p-5">
       <h2 className="font-semibold text-gray-900 mb-1">用印版本</h2>
       <p className="text-xs text-gray-400 mb-4">上傳雙方已簽署用印的合約文件</p>
+
+      {fileError && (
+        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+          {fileError}
+        </div>
+      )}
 
       {files.length > 0 && (
         <div className="space-y-2 mb-4">
@@ -469,10 +517,11 @@ function FilesPanel({ grNumber }: { grNumber: string }) {
                   </p>
                 </div>
                 <button
-                  onClick={() => handleDelete(f.id)}
-                  className="text-gray-300 hover:text-red-400 text-xs transition-colors shrink-0"
+                  onClick={() => setDeleteTarget(f)}
+                  disabled={deletingId === f.id}
+                  className="text-gray-300 hover:text-red-400 text-xs transition-colors shrink-0 disabled:opacity-40"
                   title="刪除"
-                >✕</button>
+                >{deletingId === f.id ? '刪除中' : '✕'}</button>
               </div>
               {f.driveUrl && !f.driveUrl.startsWith('error:') ? (
                 <a
@@ -505,6 +554,54 @@ function FilesPanel({ grNumber }: { grNumber: string }) {
         {uploading ? '上傳中...' : '+ 上傳用印文件'}
       </button>
       <p className="text-xs text-gray-400 mt-1.5 text-center">支援 PDF、Word、Excel、ZIP、圖片，限 50 MB</p>
+
+      {activities.length > 0 && (
+        <div className="mt-5 border-t border-gray-100 pt-4">
+          <h3 className="text-sm font-semibold text-gray-800 mb-2">最近編輯紀錄</h3>
+          <div className="space-y-2">
+            {activities.slice(0, 6).map(item => (
+              <div key={item.id} className="text-xs text-gray-500 leading-relaxed">
+                <span className="font-medium text-gray-700">{item.author.split('@')[0]}</span>
+                <span> {activityLabel(item)}</span>
+                {item.targetName && <span className="text-gray-700">：{item.targetName}</span>}
+                <span className="ml-1 text-gray-400">
+                  {new Date(item.createdAt).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4">
+          <div className="w-full max-w-sm rounded-lg bg-white p-5 shadow-xl">
+            <h3 className="text-base font-semibold text-gray-900">確認刪除用印文件？</h3>
+            <p className="mt-2 text-sm text-gray-600 break-words">
+              刪除後會同步移除 Google Drive 上的歸檔檔案，這個動作會留下編輯紀錄。
+            </p>
+            <p className="mt-3 rounded bg-gray-50 px-3 py-2 text-xs text-gray-700 break-words">
+              {deleteTarget.originalName}
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deletingId !== null}
+                className="btn-secondary text-sm disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deletingId !== null}
+                className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white hover:bg-red-600 disabled:opacity-50"
+              >
+                {deletingId !== null ? '刪除中...' : '確認刪除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

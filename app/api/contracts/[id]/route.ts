@@ -3,7 +3,7 @@ import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
 import { fetchAllSheetData, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
-import { getContractCache, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, setManualGame } from '@/lib/db'
+import { addActivityLog, getContractCache, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, setManualGame } from '@/lib/db'
 import type { ContractDetail, ContractStatus, GameType } from '@/types'
 
 export async function GET(
@@ -125,22 +125,49 @@ export async function PATCH(
   const body = await request.json() as { action: 'lock' | 'unlock' | 'set-game'; status?: ContractStatus; game?: string }
 
   if (body.action === 'lock' && body.status) {
+    const author = session.user?.email || session.user?.name || '未知使用者'
     setManualLock({
       grNumber,
       status: body.status,
-      lockedBy: session.user?.email || 'unknown',
+      lockedBy: author,
       lockedAt: new Date().toISOString(),
+    })
+    addActivityLog({
+      grNumber,
+      action: 'lock_status',
+      targetType: 'status',
+      targetName: body.status,
+      author,
+      details: `手動設定合約狀態為「${body.status}」`,
     })
     return NextResponse.json({ success: true, locked: true, status: body.status })
   }
 
   if (body.action === 'unlock') {
+    const author = session.user?.email || session.user?.name || '未知使用者'
     removeManualLock(grNumber)
+    addActivityLog({
+      grNumber,
+      action: 'unlock_status',
+      targetType: 'status',
+      targetName: null,
+      author,
+      details: '取消手動鎖定合約狀態',
+    })
     return NextResponse.json({ success: true, locked: false })
   }
 
   if (body.action === 'set-game' && body.game) {
+    const author = session.user?.email || session.user?.name || '未知使用者'
     setManualGame(grNumber, body.game)
+    addActivityLog({
+      grNumber,
+      action: 'set_game',
+      targetType: 'game',
+      targetName: body.game,
+      author,
+      details: `手動設定遊戲項目為「${body.game}」`,
+    })
     return NextResponse.json({ success: true, game: body.game })
   }
 

@@ -83,6 +83,17 @@ function initSchema(database: Database.Database) {
       drive_url TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS activity_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      gr_number TEXT NOT NULL,
+      action TEXT NOT NULL,
+      target_type TEXT,
+      target_name TEXT,
+      author TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      details TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS invoice_records (
       gr_number TEXT PRIMARY KEY,
       applied_at TEXT NOT NULL,
@@ -455,6 +466,17 @@ export interface ContractFile {
   driveUrl?: string
 }
 
+export interface ActivityLog {
+  id: number
+  grNumber: string
+  action: string
+  targetType: string | null
+  targetName: string | null
+  author: string
+  createdAt: string
+  details: string | null
+}
+
 export function getContractFiles(grNumber: string): ContractFile[] {
   const database = getDb()
   const rows = database.prepare('SELECT * FROM contract_files WHERE gr_number = ? ORDER BY uploaded_at DESC').all(grNumber) as Record<string, unknown>[]
@@ -470,6 +492,60 @@ export function getContractFiles(grNumber: string): ContractFile[] {
     driveFileId: r.drive_file_id as string | undefined,
     driveUrl: r.drive_url as string | undefined,
   }))
+}
+
+export function getActivityLogs(grNumber: string, limit = 50): ActivityLog[] {
+  const database = getDb()
+  const rows = database.prepare(`
+    SELECT * FROM activity_logs
+    WHERE gr_number = ?
+    ORDER BY created_at DESC, id DESC
+    LIMIT ?
+  `).all(grNumber, limit) as Record<string, unknown>[]
+  return rows.map(r => ({
+    id: r.id as number,
+    grNumber: r.gr_number as string,
+    action: r.action as string,
+    targetType: r.target_type as string | null,
+    targetName: r.target_name as string | null,
+    author: r.author as string,
+    createdAt: r.created_at as string,
+    details: r.details as string | null,
+  }))
+}
+
+export function addActivityLog(log: {
+  grNumber: string
+  action: string
+  targetType?: string | null
+  targetName?: string | null
+  author: string
+  details?: string | null
+}): ActivityLog {
+  const database = getDb()
+  const createdAt = new Date().toISOString()
+  const result = database.prepare(`
+    INSERT INTO activity_logs (gr_number, action, target_type, target_name, author, created_at, details)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    log.grNumber,
+    log.action,
+    log.targetType ?? null,
+    log.targetName ?? null,
+    log.author,
+    createdAt,
+    log.details ?? null
+  )
+  return {
+    id: result.lastInsertRowid as number,
+    grNumber: log.grNumber,
+    action: log.action,
+    targetType: log.targetType ?? null,
+    targetName: log.targetName ?? null,
+    author: log.author,
+    createdAt,
+    details: log.details ?? null,
+  }
 }
 
 export function addContractFile(file: Omit<ContractFile, 'id'>): ContractFile {

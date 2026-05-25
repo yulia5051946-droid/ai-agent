@@ -1,12 +1,26 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
-import { deleteContractFile, getContractFiles } from '@/lib/db'
+import { addActivityLog, deleteContractFile, getActivityLogs, getContractFiles } from '@/lib/db'
 import { deleteFileFromDrive } from '@/lib/drive'
 import { readFile, unlink } from 'fs/promises'
 import path from 'path'
 
 function buildFilePath(grNumber: string, storedName: string) {
   return path.join(process.cwd(), 'data', 'uploads', grNumber, storedName)
+}
+
+function getErrorStatus(err: unknown): number | undefined {
+  if (typeof err === 'object' && err !== null) {
+    const maybeResponse = (err as { response?: { status?: number } }).response
+    const maybeCode = (err as { code?: number | string }).code
+    if (typeof maybeResponse?.status === 'number') return maybeResponse.status
+    if (typeof maybeCode === 'number') return maybeCode
+    if (typeof maybeCode === 'string') {
+      const parsed = parseInt(maybeCode, 10)
+      return Number.isNaN(parsed) ? undefined : parsed
+    }
+  }
+  return undefined
 }
 
 export async function GET(
@@ -48,20 +62,40 @@ export async function DELETE(
   if (!session?.accessToken) return NextResponse.json({ error: '未授權' }, { status: 401 })
 
   const { id, fileId } = await params
+  const grNumber = id.toUpperCase()
   const fileIdNum = parseInt(fileId)
   if (isNaN(fileIdNum)) return NextResponse.json({ error: '無效 ID' }, { status: 400 })
 
-  const record = deleteContractFile(fileIdNum)
+  const record = getContractFiles(grNumber).find(f => f.id === fileIdNum)
   if (!record) return NextResponse.json({ error: '找不到檔案' }, { status: 404 })
 
-  const fp = buildFilePath(id.toUpperCase(), record.storedName)
-  try { await unlink(fp) } catch { /* file may already be gone */ }
-
   if (record.driveFileId) {
-    deleteFileFromDrive(session.accessToken, record.driveFileId).catch(err =>
-      console.error('[Drive] 刪除失敗:', err)
-    )
+    try {
+      await deleteFileFromDrive(session.accessToken, record.driveFileId)
+    } catch (err) {
+      const status = getErrorStatus(err)
+      if (status !== 404) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error('[Drive] 刪除失敗:', msg)
+        return NextResponse.json({ error: `Google Drive 刪除失敗：${msg}` }, { status: 502 })
+      }
+    }
   }
 
-  return NextResponse.json({ success: true })
+  deleteContractFile(fileIdNum)
+
+  const fp = buildFilePath(grNumber, record.storedName)
+  try { await unlink(fp) } catch { /* file may already be gone */ }
+
+  const author = session.user?.email || session.user?.name || '未知使用者'
+  const activity = addActivityLog({
+    grNumber,
+    action: 'delete_file',
+    targetType: 'file',
+    targetName: record.originalName,
+    author,
+    details: record.driveFileId ? '已同步刪除 Google Drive 檔案' : '刪除本機用印文件',
+  })
+
+  return NextResponse.json({ success: true, activity, activities: getActivityLogs(grNumber, 30) })
 }

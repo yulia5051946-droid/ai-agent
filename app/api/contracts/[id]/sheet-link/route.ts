@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { fetchAllSheetData, writeGrNumberToSheet } from '@/lib/sheets'
-import { getContractCache, setAutoSheetLinkMode, setManualResourceData } from '@/lib/db'
+import { addActivityLog, getContractCache, setAutoSheetLinkMode, setManualResourceData } from '@/lib/db'
 import type { SheetContractData } from '@/types'
 
 // rowKey 格式：spreadsheetId::sheetTitle::rowIndex
@@ -139,6 +139,7 @@ export async function POST(
   }
 
   if (body.action === 'manual') {
+    const author = session.user?.email || session.user?.name || '未知使用者'
     const data = body.data || {}
     const clean = (value: string | undefined) => {
       const trimmed = value?.trim()
@@ -155,6 +156,14 @@ export async function POST(
         sponsorAmountUSD: clean(data.sponsorAmountUSD),
         cooperationPeriod: clean(data.cooperationPeriod),
         responsiblePerson: clean(data.responsiblePerson),
+      })
+      addActivityLog({
+        grNumber,
+        action: 'manual_resource',
+        targetType: 'sheet-link',
+        targetName: '不連結表格',
+        author,
+        details: '手動更新資源內容',
       })
       return NextResponse.json({ success: true, grNumber, sheetLinkMode: 'manual' })
     } catch (err) {
@@ -186,6 +195,14 @@ export async function POST(
   try {
     await writeGrNumberToSheet(session.accessToken, fakeRow, grNumber)
     setAutoSheetLinkMode(grNumber)
+    addActivityLog({
+      grNumber,
+      action: 'link_sheet',
+      targetType: 'sheet-link',
+      targetName: body.rowKey,
+      author: session.user?.email || session.user?.name || '未知使用者',
+      details: '更新對應 Sheet 列',
+    })
     return NextResponse.json({ success: true, grNumber, rowKey: body.rowKey })
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 500 })

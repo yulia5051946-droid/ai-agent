@@ -76,5 +76,5 @@ export async function uploadContractFileToDrive(
 export async function deleteFileFromDrive(accessToken: string, driveFileId: string): Promise<void> {
   const auth = getAuth(accessToken)
   const drive = google.drive({ version: 'v3', auth })
-  await drive.files.delete({ fileId: driveFileId }).catch(() => {})
+  await drive.files.delete({ fileId: driveFileId, supportsAllDrives: true })
 }
