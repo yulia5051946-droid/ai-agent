@@ -11,6 +11,24 @@ function extractYear(cooperationPeriod: string | null | undefined): string | nul
   return match ? match[0] : null
 }
 
+function extractYearMonth(cooperationPeriod: string | null | undefined): string | null {
+  if (!cooperationPeriod) return null
+  const match = cooperationPeriod.match(/(20\d{2})[./\-\s年]*(0?[1-9]|1[0-2])(?:月)?/)
+  if (!match) return null
+  return `${match[1]}${match[2].padStart(2, '0')}`
+}
+
+function currentTaipeiYearMonth(date: Date): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+  }).formatToParts(date)
+  const year = parts.find(p => p.type === 'year')?.value ?? String(date.getUTCFullYear())
+  const month = parts.find(p => p.type === 'month')?.value ?? String(date.getUTCMonth() + 1).padStart(2, '0')
+  return `${year}${month}`
+}
+
 function cleanFilePart(value: string | null | undefined, fallback: string): string {
   const cleaned = (value || fallback)
     .replace(/[\\/:*?"<>|#%{}~&]/g, ' ')
@@ -19,19 +37,9 @@ function cleanFilePart(value: string | null | undefined, fallback: string): stri
   return cleaned || fallback
 }
 
-function buildArchiveName(date: Date, game: string, grNumber: string, partner: string | null | undefined, originalName: string): string {
+function buildArchiveName(yearMonth: string, game: string, grNumber: string, partner: string | null | undefined, originalName: string): string {
   const ext = path.extname(originalName)
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Taipei',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(date)
-  const year = parts.find(p => p.type === 'year')?.value ?? String(date.getUTCFullYear())
-  const month = parts.find(p => p.type === 'month')?.value ?? String(date.getUTCMonth() + 1).padStart(2, '0')
-  const day = parts.find(p => p.type === 'day')?.value ?? String(date.getUTCDate()).padStart(2, '0')
-  const datePart = `${year}${month}${day}`
-  return `${datePart}_${cleanFilePart(game, 'unknown')}_${cleanFilePart(grNumber, 'GR')}_${cleanFilePart(partner, '合作廠商')}${ext}`
+  return `${yearMonth}_${cleanFilePart(game, 'unknown')}_${cleanFilePart(grNumber, 'GR')}_${cleanFilePart(partner, '合作廠商')}${ext}`
 }
 
 function uploadDir(grNumber: string) {
@@ -74,7 +82,8 @@ export async function POST(
   const game = contract?.game || 'unknown'
   const year = extractYear(contract?.cooperationPeriod) ?? new Date().getFullYear().toString()
   const uploadedAt = new Date()
-  const archiveName = buildArchiveName(uploadedAt, game, grNumber, contract?.partner, file.name)
+  const yearMonth = extractYearMonth(contract?.cooperationPeriod) ?? currentTaipeiYearMonth(uploadedAt)
+  const archiveName = buildArchiveName(yearMonth, game, grNumber, contract?.partner, file.name)
   const storedName = `${Date.now()}_${archiveName}`
   const dir = uploadDir(grNumber)
 
