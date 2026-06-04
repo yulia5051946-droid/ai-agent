@@ -3,6 +3,7 @@ import type { EmailTimelineItem, FinanceInfo } from '@/types'
 
 const MAILSUITE_FILTER = /mailsuite/i
 const CONTRACT_SUBJECT_PATTERN = /[\[【]?合約審閱[\]】]?/
+const CONTRACT_LIKE_PATTERN = /合約審閱|合約|契約|用印|NDA|保密|contract|agreement/i
 const GR_NUMBER_PATTERN = /GR[\s\-]?\d{3,8}/i   // 允許 GR001164 / GR-001164 / GR 001164
 const INVOICE_SUBJECT = /Thanks for filling out this form: Garena 發票開立申請單/
 
@@ -51,39 +52,64 @@ function createGmailClient(accessToken: string) {
 export async function fetchContractThreads(accessToken: string): Promise<GmailThread[]> {
   const gmail = createGmailClient(accessToken)
 
-  // 分頁抓完全部符合的 thread（Gmail 單次最多 500，超過需 nextPageToken）
-  const allThreadIds: string[] = []
-  let pageToken: string | undefined
+  const queries = [
+    'subject:合約審閱',
+    '合約審閱',
+    'GR 合約',
+    'GR 用印',
+    'GR contract',
+    'GR agreement',
+    'GR NDA',
+  ]
+  const allThreadIds = new Set<string>()
 
-  do {
-    const res = await gmail.users.threads.list({
-      userId: 'me',
-      q: 'subject:合約審閱',
-      maxResults: 500,
-      pageToken,
-    })
-    const page = res.data.threads || []
-    allThreadIds.push(...page.map(t => t.id!))
-    pageToken = res.data.nextPageToken ?? undefined
-  } while (pageToken)
+  for (const q of queries) {
+    let pageToken: string | undefined
+    let queryCount = 0
+    do {
+      const res = await gmail.users.threads.list({
+        userId: 'me',
+        q,
+        maxResults: 500,
+        pageToken,
+      })
+      const page = res.data.threads || []
+      for (const t of page) {
+        if (t.id) allThreadIds.add(t.id)
+      }
+      queryCount += page.length
+      pageToken = res.data.nextPageToken ?? undefined
+    } while (pageToken)
+    console.log(`[Gmail] query="${q}" 找到 ${queryCount} 個 thread`)
+  }
 
-  console.log(`[Gmail] 共找到 ${allThreadIds.length} 個合約審閱 thread`)
+  console.log(`[Gmail] 去重後共找到 ${allThreadIds.size} 個候選合約 thread`)
 
   const results: GmailThread[] = []
 
   // Batch fetch with concurrency limit
   const batchSize = 10
-  for (let i = 0; i < allThreadIds.length; i += batchSize) {
-    const batch = allThreadIds.slice(i, i + batchSize)
+  const ids = Array.from(allThreadIds)
+  for (let i = 0; i < ids.length; i += batchSize) {
+    const batch = ids.slice(i, i + batchSize)
     const resolved = await Promise.all(
       batch.map(id => fetchThread(gmail, id).catch(() => null))
     )
     for (const thread of resolved) {
-      if (thread) results.push(thread)
+      if (thread && isContractLikeThread(thread)) results.push(thread)
     }
   }
 
+  console.log(`[Gmail] 合約 thread 通過過濾 ${results.length}/${allThreadIds.size}`)
   return results
+}
+
+function isContractLikeThread(thread: GmailThread): boolean {
+  const text = [
+    thread.subject,
+    ...thread.messages.flatMap(m => [m.subject, m.snippet, m.bodyText.slice(0, 500)]),
+  ].join(' ')
+  return CONTRACT_LIKE_PATTERN.test(text)
 }
 
 export async function fetchThreadByGrNumber(accessToken: string, grNumber: string): Promise<GmailThread | null> {
