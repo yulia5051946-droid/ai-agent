@@ -2,28 +2,19 @@ import NextAuth from 'next-auth'
 import { getServerSession, type NextAuthOptions } from 'next-auth'
 import GoogleProvider from 'next-auth/providers/google'
 import type { JWT } from 'next-auth/jwt'
+import { saveSyncCredential } from '@/lib/db'
+import { refreshGoogleAccessToken } from '@/lib/google-token'
 
 const ALLOWED_DOMAINS = ['garena.com', 'sea.com']
 
 async function refreshAccessToken(token: JWT): Promise<JWT> {
   try {
-    const response = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        client_id: process.env.GOOGLE_CLIENT_ID!,
-        client_secret: process.env.GOOGLE_CLIENT_SECRET!,
-        grant_type: 'refresh_token',
-        refresh_token: token.refreshToken as string,
-      }),
-    })
-    const data = await response.json()
-    if (!response.ok) throw data
+    const data = await refreshGoogleAccessToken(token.refreshToken as string)
     return {
       ...token,
-      accessToken: data.access_token,
-      expiresAt: Math.floor(Date.now() / 1000) + data.expires_in,
-      refreshToken: data.refresh_token ?? token.refreshToken,
+      accessToken: data.accessToken,
+      expiresAt: data.expiresAt ?? token.expiresAt,
+      refreshToken: data.refreshToken ?? token.refreshToken,
     }
   } catch {
     return { ...token, error: 'RefreshAccessTokenError' }
@@ -54,8 +45,17 @@ export const authOptions: NextAuthOptions = {
       const domain = (user.email || '').split('@')[1]
       return Boolean(domain && ALLOWED_DOMAINS.includes(domain))
     },
-    async jwt({ token, account }) {
+    async jwt({ token, account, user }) {
       if (account) {
+        const email = user?.email || token.email
+        if (email && account.refresh_token) {
+          saveSyncCredential(
+            email,
+            account.refresh_token,
+            account.access_token,
+            account.expires_at ?? null
+          )
+        }
         return {
           ...token,
           accessToken: account.access_token,

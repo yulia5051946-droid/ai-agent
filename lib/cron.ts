@@ -1,7 +1,19 @@
 import cron from 'node-cron'
 import nodemailer from 'nodemailer'
-import { getAllContractCache, getAllManualLocks, getLegalNotesMap } from './db'
+import {
+  backupDatabase,
+  getAllContractCache,
+  getAllManualLocks,
+  getLatestSyncCredential,
+  getLegalNotesMap,
+  saveSyncCredential,
+  updateSyncCredentialAccessToken,
+} from './db'
+import { refreshGoogleAccessToken } from './google-token'
+import { runContractSync } from './contract-sync'
 import type { ContractStatus } from '@/types'
+
+let contractSyncRunning = false
 
 function daysSince(dateStr: string | null): number {
   if (!dateStr) return 999
@@ -186,7 +198,62 @@ async function sendWeeklyReport() {
   console.log(`[Cron] 週報已寄送至 ${recipients.join(', ')}`)
 }
 
+async function runScheduledContractSync() {
+  if (contractSyncRunning) {
+    console.log('[Cron] 上一次合約同步仍在執行，略過本次排程')
+    return
+  }
+
+  const credential = getLatestSyncCredential()
+  if (!credential) {
+    console.warn('[Cron] 尚未取得可用的 Google refresh token，請由 BD 帳號重新登入一次以啟用自動同步')
+    return
+  }
+
+  contractSyncRunning = true
+  try {
+    const token = await refreshGoogleAccessToken(credential.refreshToken)
+    const refreshToken = token.refreshToken || credential.refreshToken
+    if (token.refreshToken) {
+      saveSyncCredential(credential.email, token.refreshToken, token.accessToken, token.expiresAt)
+    } else {
+      updateSyncCredentialAccessToken(credential.email, token.accessToken, token.expiresAt)
+    }
+
+    const result = await runContractSync(token.accessToken, { source: `cron:${credential.email}` })
+    const backupPath = await backupDatabase('cron-sync')
+    console.log(`[Cron] 合約資料同步完成：${result.succeeded}/${result.threads}，Sheet ${result.sheetRows} 筆，備份 ${backupPath}`)
+
+    if (refreshToken !== credential.refreshToken) {
+      console.log('[Cron] Google refresh token 已更新')
+    }
+  } catch (err) {
+    console.error('[Cron] 合約資料同步失敗:', err)
+  } finally {
+    contractSyncRunning = false
+  }
+}
+
+async function runDailyBackup() {
+  try {
+    const backupPath = await backupDatabase('daily')
+    console.log(`[Cron] 每日資料庫備份完成：${backupPath}`)
+  } catch (err) {
+    console.error('[Cron] 每日資料庫備份失敗:', err)
+  }
+}
+
 export function initCron() {
+  // 每 30 分鐘同步 Gmail / Sheets / 合約辨識結果，避免快取資料停在舊版本。
+  cron.schedule('*/30 * * * *', runScheduledContractSync, {
+    timezone: 'Asia/Taipei',
+  })
+
+  // 每天凌晨留一份 SQLite 快照，部署或資料異常時可回溯。
+  cron.schedule('10 3 * * *', runDailyBackup, {
+    timezone: 'Asia/Taipei',
+  })
+
   // 每週一早上 9 點（台灣時間）
   cron.schedule('0 9 * * 1', async () => {
     try {
@@ -198,5 +265,7 @@ export function initCron() {
     timezone: 'Asia/Taipei',
   })
 
+  console.log('[Cron] 合約資料同步排程已啟動（每 30 分鐘）')
+  console.log('[Cron] 每日資料庫備份排程已啟動（每日台灣時間 03:10）')
   console.log('[Cron] 每週週報排程已啟動（每週一台灣時間 09:00）')
 }

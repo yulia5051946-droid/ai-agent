@@ -108,6 +108,14 @@ function initSchema(database: Database.Database) {
       display_name TEXT NOT NULL,
       role TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS sync_credentials (
+      email TEXT PRIMARY KEY,
+      refresh_token TEXT NOT NULL,
+      access_token TEXT,
+      expires_at INTEGER,
+      updated_at TEXT NOT NULL
+    );
   `)
 }
 
@@ -624,4 +632,90 @@ export function isBDMember(email: string): boolean {
   // 未在 team_members 的帳號預設允許（BD 新成員還沒加進去的情境）
   if (role === null) return true
   return role === 'BD'
+}
+
+export interface SyncCredential {
+  email: string
+  refreshToken: string
+  accessToken: string | null
+  expiresAt: number | null
+  updatedAt: string
+}
+
+export function saveSyncCredential(
+  email: string,
+  refreshToken: string,
+  accessToken?: string | null,
+  expiresAt?: number | null
+): void {
+  const database = getDb()
+  database.prepare(`
+    INSERT INTO sync_credentials (email, refresh_token, access_token, expires_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(email) DO UPDATE SET
+      refresh_token = excluded.refresh_token,
+      access_token = excluded.access_token,
+      expires_at = excluded.expires_at,
+      updated_at = excluded.updated_at
+  `).run(email.toLowerCase(), refreshToken, accessToken ?? null, expiresAt ?? null, new Date().toISOString())
+}
+
+export function updateSyncCredentialAccessToken(
+  email: string,
+  accessToken: string,
+  expiresAt: number | null
+): void {
+  const database = getDb()
+  database.prepare(`
+    UPDATE sync_credentials
+    SET access_token = ?, expires_at = ?, updated_at = ?
+    WHERE email = ?
+  `).run(accessToken, expiresAt, new Date().toISOString(), email.toLowerCase())
+}
+
+export function getLatestSyncCredential(): SyncCredential | null {
+  const database = getDb()
+  const row = database.prepare(`
+    SELECT * FROM sync_credentials
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get() as Record<string, unknown> | undefined
+  if (!row) return null
+  return {
+    email: row.email as string,
+    refreshToken: row.refresh_token as string,
+    accessToken: row.access_token as string | null,
+    expiresAt: row.expires_at as number | null,
+    updatedAt: row.updated_at as string,
+  }
+}
+
+export async function backupDatabase(label = 'backup'): Promise<string> {
+  const database = getDb()
+  const dbDir = path.dirname(DB_PATH)
+  const backupDir = path.join(dbDir, 'backups')
+  if (!fs.existsSync(backupDir)) {
+    fs.mkdirSync(backupDir, { recursive: true })
+  }
+
+  const safeLabel = label.replace(/[^a-z0-9_-]/gi, '-').slice(0, 32) || 'backup'
+  const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z')
+  const backupPath = path.join(backupDir, `contracts-${stamp}-${safeLabel}.db`)
+  await database.backup(backupPath)
+
+  const keep = 80
+  const oldBackups = fs.readdirSync(backupDir)
+    .filter(name => /^contracts-.*\.db$/.test(name))
+    .map(name => {
+      const filePath = path.join(backupDir, name)
+      return { filePath, mtimeMs: fs.statSync(filePath).mtimeMs }
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(keep)
+
+  for (const file of oldBackups) {
+    try { fs.unlinkSync(file.filePath) } catch { /* keep if locked */ }
+  }
+
+  return backupPath
 }

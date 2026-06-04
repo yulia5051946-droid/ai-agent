@@ -1,21 +1,13 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
-import { upsertContractCache, getAllContractCache, getAllManualLocks, upsertInvoiceRecord, getLegalNotesMap, getAllTeamMembers, isBDMember } from '@/lib/db'
-import type { Contract, ContractStatus, GameType, SheetContractData } from '@/types'
-
-const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
+import { backupDatabase, getAllContractCache, getAllManualLocks, getLegalNotesMap, isBDMember, saveSyncCredential } from '@/lib/db'
+import { runContractSync } from '@/lib/contract-sync'
+import type { Contract, ContractStatus, GameType } from '@/types'
 
 function daysSince(dateStr: string | null): number {
   if (!dateStr) return 999
   const diff = Date.now() - new Date(dateStr).getTime()
   return Math.floor(diff / (1000 * 60 * 60 * 24))
-}
-
-function detectGame(subject: string): GameType {
-  if (/\bAOV\b|傳說對決|Arena of Valor/i.test(subject)) return 'AOV'
-  if (/\bCODM\b|使命召喚/i.test(subject)) return 'CODM'   // CODM 先判，避免被 DF 誤吃
-  if (/\bDF\b|決鬥|Undawn/i.test(subject)) return 'DF'
-  return 'unknown'
 }
 
 export async function GET(request: Request) {
@@ -43,140 +35,12 @@ export async function GET(request: Request) {
     return NextResponse.json(buildContractList(cached, manualLocks))
   }
 
-  // Fetch fresh data from Gmail
   try {
-    const [
-      gmail,
-      claude,
-      sheets,
-    ] = await Promise.all([
-      import('@/lib/gmail'),
-      import('@/lib/claude'),
-      import('@/lib/sheets'),
-    ])
-
-    const [threads, invoiceMap, allSheetData] = await Promise.all([
-      gmail.fetchContractThreads(accessToken),
-      gmail.fetchInvoiceEmails(accessToken).catch(() => new Map()),
-      sheets.fetchAllSheetData(accessToken).catch(() => new Map<string, SheetContractData[]>()),
-    ])
-
-    const sheetTotal = Array.from(allSheetData.values()).reduce((s, rows) => s + rows.length, 0)
-    console.log(`[Contracts] 找到 ${threads.length} 個 thread，Sheet 資料 ${sheetTotal} 筆（${allSheetData.size} 家廠商）`)
-    threads.forEach(t => {
-      const partner = extractPartnerFromSubject(t.subject)
-      const desc = claude.extractDescription(t.subject)
-      const game = detectGame(t.subject)
-      const filtered = sheets.filterSheetDataByGame(allSheetData, game)
-      const matched = sheets.matchSheetData(partner, filtered, desc, t.grNumber)
-      if (!matched) console.log(`[Sheets] 未比對 ${t.grNumber}(${game}): 廠商「${partner}」`)
-      else console.log(`[Sheets] 比對到 ${t.grNumber}(${game}): 廠商「${partner}」→「${matched.partner}」`)
-    })
-
-    // Update invoice records
-    for (const [grNumber, invoice] of invoiceMap.entries()) {
-      upsertInvoiceRecord({
-        grNumber,
-        appliedAt: invoice.appliedAt,
-        issuedAt: null,
-        amount: invoice.amount,
-        updatedAt: new Date().toISOString(),
-      })
+    if (session.user?.email && session.refreshToken) {
+      saveSyncCredential(session.user.email, session.refreshToken, accessToken, null)
     }
-
-    const teamMembers = getAllTeamMembers()
-    // Analyze threads with Claude (batch with rate limit awareness)
-    console.log(`[Contracts] 開始分析 ${threads.length} 份合約`)
-    const analysisResults = await Promise.allSettled(
-      threads.map(async thread => {
-        try {
-          const analysis = await claude.analyzeContractThread(thread, teamMembers)
-          const lastMsg = thread.messages[thread.messages.length - 1]
-          const contractVersion = gmail.extractLatestContractVersion(thread.messages)
-          const appliedAt = gmail.extractAppliedDate(thread.messages)
-          const financeInfo = gmail.detectFinanceInfo(thread.messages)
-
-          const partner = extractPartnerFromSubject(thread.subject)
-          const emailDesc = claude.extractDescription(thread.subject)
-          const existingCache = cached.find(c => c.grNumber === thread.grNumber)
-
-          // 決定有效遊戲：手動設定 > subject 偵測 > cache 舊值
-          const gameManual = existingCache?.gameManual ?? false
-          const detectedGame = detectGame(thread.subject)
-          const effectiveGame: GameType = gameManual
-            ? (existingCache!.game as GameType)
-            : (detectedGame !== 'unknown' ? detectedGame : (existingCache?.game as GameType | undefined) ?? 'unknown')
-
-          // 只在有效遊戲的 Sheet 資料中比對，避免同廠商跨遊戲誤抓 AOV 列。
-          const gameSheetData = sheets.filterSheetDataByGame(allSheetData, effectiveGame)
-          const sheetData = existingCache?.sheetLinkMode === 'manual'
-            ? null
-            : sheets.matchSheetData(partner, gameSheetData, emailDesc, thread.grNumber)
-
-          if (sheetData && thread.grNumber && sheetData._grLinked !== thread.grNumber) {
-            // Fire and forget — don't await, don't block analysis
-            sheets.writeGrNumberToSheet(accessToken, sheetData, thread.grNumber).catch(err =>
-              console.error(`[Sheets] ${thread.grNumber} 回寫失敗:`, String(err))
-            )
-          }
-
-          // 遊戲欄位：手動設定的不被 sheetData 覆寫
-          const finalGame: GameType = gameManual
-            ? (existingCache!.game as GameType)
-            : ((sheetData?.game as GameType | undefined) ?? effectiveGame)
-
-          const TERMINAL_STATUSES: ContractStatus[] = ['合約取消', '合約完成']
-          const cachedStatus = existingCache?.status as ContractStatus | undefined
-          const finalStatus = (cachedStatus && TERMINAL_STATUSES.includes(cachedStatus))
-            ? cachedStatus
-            : analysis.status
-
-          console.log(`[Status] ${thread.grNumber}(${effectiveGame}): cache="${cachedStatus}" ai="${analysis.status}" final="${finalStatus}"`)
-          upsertContractCache({
-            grNumber: thread.grNumber,
-            threadId: thread.threadId,
-            game: finalGame,
-            gameManual,
-            partner,
-            subject: thread.subject,
-            appliedAt,
-            lastEmailAt: lastMsg?.date || null,
-            status: finalStatus,
-            responsibleLegal: analysis.responsibleLegal,
-            hasAuthorizationLetter: analysis.hasAuthorizationLetter,
-            contractVersion: contractVersion || analysis.contractVersion,
-            financeConfirmed: analysis.financeConfirmed || financeInfo.confirmed,
-            nextAction: analysis.nextAction,
-            summary: analysis.summary,
-            updatedAt: new Date().toISOString(),
-            // 以下欄位只從 Sheet 取，沒比對到就留空
-            description: sheetData?.description || null,
-            contractType: sheetData?.type || null,
-            exposureSeason: sheetData?.exposureSeason || null,
-            ourProvisions: sheetData?.ourProvisions || null,
-            theirProvisions: sheetData?.theirProvisions || null,
-            sponsorAmountNTD: sheetData?.sponsorAmountNTD || null,
-            sponsorAmountUSD: sheetData?.sponsorAmountUSD || null,
-            cooperationPeriod: sheetData?.cooperationPeriod || null,
-            responsiblePerson: sheetData?.responsiblePerson || null,
-            legalProgressNote: analysis.legalProgressNote,
-          })
-
-          return thread.grNumber
-        } catch (err) {
-          console.error(`[Contracts] 分析錯誤 ${thread.grNumber}:`, String(err))
-          throw err
-        }
-      })
-    )
-
-    const succeeded = analysisResults.filter(r => r.status === 'fulfilled').length
-    console.log(`[Contracts] 更新 ${succeeded}/${threads.length} 份合約`)
-    if (succeeded === 0 && threads.length > 0) {
-      const firstRejected = analysisResults.find(r => r.status === 'rejected') as PromiseRejectedResult | undefined
-      console.error('[Contracts] 第一個錯誤:', String(firstRejected?.reason))
-    }
-
+    await runContractSync(accessToken, { source: session.user?.email || 'manual' })
+    backupDatabase('manual-sync').catch(err => console.error('[Contracts] 手動同步備份失敗:', err))
     const updatedCache = getAllContractCache()
     return NextResponse.json(buildContractList(updatedCache, getAllManualLocks()))
   } catch (err) {
@@ -236,10 +100,4 @@ function buildContractList(
   })
 
   return { contracts }
-}
-
-function extractPartnerFromSubject(subject: string): string {
-  // Subject format: [合約審閱]MOBTW (競舞電競)_統一數網股份有限公司_傳說對決X 純喫茶 聯名合作 - GR000965
-  const match = subject.match(/\[合約審閱\][^_]*_([^_]+)_/)
-  return match ? match[1].trim() : subject.replace(/\[合約審閱\].*?[-–]\s*GR\d+/i, '').trim()
 }
