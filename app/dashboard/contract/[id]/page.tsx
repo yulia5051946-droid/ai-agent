@@ -98,6 +98,16 @@ export default function ContractDetailPage() {
     </div>
   )
   if (!contract) return null
+  const mailAttachments = (contract.timeline || []).flatMap((item, messageIndex) =>
+    (item.attachments || []).map(attachment => ({
+      ...attachment,
+      role: item.role,
+      from: item.from,
+      date: item.date,
+      messageIndex,
+      stage: classifyAttachmentStage(item.role, attachment.filename, item.summary),
+    }))
+  )
 
   return (
     <div className="space-y-6">
@@ -281,11 +291,51 @@ export default function ContractDetailPage() {
             />
           </div>
 
+          {/* Mail attachments */}
+          {mailAttachments.length > 0 && (
+            <div className="card p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h2 className="font-semibold text-gray-900">郵件附件總覽</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">包含各階段往來信件中的合約版本與法務/財務附件</p>
+                </div>
+                <span className="text-xs text-gray-400 bg-gray-100 rounded-full px-2.5 py-1">{mailAttachments.length} 個檔案</span>
+              </div>
+              <div className="divide-y divide-gray-100 border border-gray-100 rounded-lg overflow-hidden">
+                {mailAttachments.map((a, i) => (
+                  <a
+                    key={`${a.messageId}-${a.attachmentId}-${i}`}
+                    href={`/api/attachments/${a.messageId}/${a.attachmentId}?filename=${encodeURIComponent(a.filename)}&mime=${encodeURIComponent(a.mimeType)}`}
+                    download={a.filename}
+                    className="flex items-center justify-between gap-3 px-4 py-3 bg-white hover:bg-orange-50 transition-colors"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${ROLE_COLORS[a.role] || ROLE_COLORS['其他']}`}>
+                          {a.role}
+                        </span>
+                        <span className="text-xs text-orange-600 bg-orange-50 rounded px-2 py-0.5">{a.stage}</span>
+                        <span className="text-sm font-medium text-gray-900 truncate">{a.filename}</span>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-400 truncate">
+                        {new Date(a.date).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })} · {a.from}
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-xs text-gray-400">{formatFileSize(a.size)}</span>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Timeline */}
           {contract.timeline && contract.timeline.length > 0 && (
             <div className="card p-6">
               <div className="flex items-center justify-between mb-5">
-                <h2 className="font-semibold text-gray-900">郵件時間軸</h2>
+                <div>
+                  <h2 className="font-semibold text-gray-900">郵件時間軸</h2>
+                  <p className="text-xs text-gray-500 mt-0.5">依 Gmail 郵件串同步，保留每封信內容與附件下載</p>
+                </div>
                 <span className="text-xs text-gray-400 bg-gray-100 rounded-full px-2.5 py-1">{contract.timeline.length} 封</span>
               </div>
               <div className="space-y-3">
@@ -299,6 +349,24 @@ export default function ContractDetailPage() {
       </div>
     </div>
   )
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function classifyAttachmentStage(role: string, filename: string, summary: string) {
+  const text = `${filename} ${summary}`.toLowerCase()
+  if (/clean|清稿|final|最終/.test(text)) return '最終清稿'
+  if (/v\d+|version|版本|draft|草稿/.test(text)) return '合約版本'
+  if (/授權/.test(text)) return '授權信'
+  if (/invoice|發票|請款/.test(text)) return '財務文件'
+  if (role === '法務') return '法務附件'
+  if (role === '財務') return '財務附件'
+  if (role === 'BD') return 'BD 附件'
+  return '郵件附件'
 }
 
 function NotesPanel({ grNumber }: { grNumber: string }) {
@@ -608,17 +676,11 @@ function FilesPanel({ grNumber }: { grNumber: string }) {
 
 function TimelineItem({ item }: { item: { date: string; from: string; role: string; summary: string; attachments?: { filename: string; mimeType: string; size: number; attachmentId: string; messageId: string }[] } }) {
   const [expanded, setExpanded] = useState(false)
-  const MAX = 300
+  const MAX = 900
   const text = item.summary || ''
   const needsToggle = text.length > MAX
   const borderColor = ROLE_BORDER[item.role] || ROLE_BORDER['其他']
   const badgeColor = ROLE_COLORS[item.role] || ROLE_COLORS['其他']
-
-  const formatSize = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`
-    return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  }
 
   return (
     <div className={`border-l-4 ${borderColor} bg-gray-50 rounded-r-lg p-4 border border-gray-100`}>
@@ -631,6 +693,7 @@ function TimelineItem({ item }: { item: { date: string; from: string; role: stri
         </span>
         <span className="text-xs text-gray-500 truncate max-w-xs">{item.from}</span>
       </div>
+      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-400 mb-1">郵件內容</div>
       <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap break-words">
         {needsToggle && !expanded ? text.slice(0, MAX) + '…' : text}
       </p>
@@ -653,7 +716,7 @@ function TimelineItem({ item }: { item: { date: string; from: string; role: stri
             >
               <span>📎</span>
               <span className="truncate max-w-[160px]">{a.filename}</span>
-              <span className="text-gray-400 shrink-0">({formatSize(a.size)})</span>
+              <span className="text-gray-400 shrink-0">({formatFileSize(a.size)})</span>
             </a>
           ))}
         </div>

@@ -190,7 +190,7 @@ function decodeBase64(str: string): string {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function extractBodyText(payload: any, maxChars = 3000): string {
+function extractBodyText(payload: any, maxChars = 12000): string {
   if (!payload) return ''
   if (payload.mimeType === 'text/plain' && payload.body?.data) {
     return decodeBase64(payload.body.data).slice(0, maxChars)
