@@ -107,7 +107,7 @@ export async function POST(request: Request) {
       sponsorAmountNTD: sheetData?.sponsorAmountNTD || null,
       sponsorAmountUSD: sheetData?.sponsorAmountUSD || null,
       cooperationPeriod: sheetData?.cooperationPeriod || null,
-      responsiblePerson: sheetData?.responsiblePerson || null,
+      responsiblePerson: analysis.responsiblePerson || sheetData?.responsiblePerson || null,
       legalProgressNote: analysis.legalProgressNote,
     })
 

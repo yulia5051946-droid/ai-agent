@@ -109,7 +109,7 @@ export async function GET(
     sponsorAmountNTD: cached?.sponsorAmountNTD || sheetData?.sponsorAmountNTD || analysis.sponsorAmountNTD || undefined,
     sponsorAmountUSD: cached?.sponsorAmountUSD || sheetData?.sponsorAmountUSD || undefined,
     cooperationPeriod: cached?.cooperationPeriod || sheetData?.cooperationPeriod || analysis.cooperationPeriod || undefined,
-    responsiblePerson: cached?.responsiblePerson || sheetData?.responsiblePerson || analysis.responsiblePerson || undefined,
+    responsiblePerson: analysis.responsiblePerson || cached?.responsiblePerson || sheetData?.responsiblePerson || undefined,
     legalProgressNote: analysis.legalProgressNote || undefined,
     sheetLinkMode: cached?.sheetLinkMode || 'auto',
   }
