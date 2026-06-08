@@ -5,6 +5,11 @@ import { uploadContractFileToDrive } from '@/lib/drive'
 import { writeFile, mkdir } from 'fs/promises'
 import path from 'path'
 
+function uploadRoot() {
+  const dbPath = process.env.DB_PATH
+  return process.env.UPLOAD_DIR || path.join(dbPath ? path.dirname(dbPath) : path.join(process.cwd(), 'data'), 'uploads')
+}
+
 function extractYear(cooperationPeriod: string | null | undefined): string | null {
   if (!cooperationPeriod) return null
   const match = cooperationPeriod.match(/\d{4}/)
@@ -43,7 +48,7 @@ function buildArchiveName(yearMonth: string, game: string, grNumber: string, par
 }
 
 function uploadDir(grNumber: string) {
-  return path.join(process.cwd(), 'data', 'uploads', grNumber)
+  return path.join(uploadRoot(), grNumber)
 }
 
 export async function GET(

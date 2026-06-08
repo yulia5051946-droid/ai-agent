@@ -1,12 +1,17 @@
 import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { addActivityLog, deleteContractFile, getActivityLogs, getContractFiles } from '@/lib/db'
-import { deleteFileFromDrive } from '@/lib/drive'
-import { readFile, unlink } from 'fs/promises'
+import { deleteFileFromDrive, downloadFileFromDrive } from '@/lib/drive'
+import { mkdir, readFile, unlink, writeFile } from 'fs/promises'
 import path from 'path'
 
+function uploadRoot() {
+  const dbPath = process.env.DB_PATH
+  return process.env.UPLOAD_DIR || path.join(dbPath ? path.dirname(dbPath) : path.join(process.cwd(), 'data'), 'uploads')
+}
+
 function buildFilePath(grNumber: string, storedName: string) {
-  return path.join(process.cwd(), 'data', 'uploads', grNumber, storedName)
+  return path.join(uploadRoot(), grNumber, storedName)
 }
 
 function getErrorStatus(err: unknown): number | undefined {
@@ -42,7 +47,7 @@ export async function GET(
   const fp = buildFilePath(grNumber, record.storedName)
   try {
     const buffer = await readFile(fp)
-    return new NextResponse(buffer, {
+    return new NextResponse(new Uint8Array(buffer), {
       headers: {
         'Content-Type': record.mimeType || 'application/octet-stream',
         'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(record.originalName)}`,
@@ -50,7 +55,26 @@ export async function GET(
       },
     })
   } catch {
-    return NextResponse.json({ error: '檔案不存在' }, { status: 404 })
+    if (!record.driveFileId) {
+      return NextResponse.json({ error: '檔案不存在' }, { status: 404 })
+    }
+
+    try {
+      const buffer = await downloadFileFromDrive(session.accessToken, record.driveFileId)
+      await mkdir(path.dirname(fp), { recursive: true })
+      await writeFile(fp, buffer)
+      return new NextResponse(new Uint8Array(buffer), {
+        headers: {
+          'Content-Type': record.mimeType || 'application/octet-stream',
+          'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(record.originalName)}`,
+          'Content-Length': String(buffer.length),
+        },
+      })
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error('[Drive] 檔案回補下載失敗:', msg)
+      return NextResponse.json({ error: `本機檔案不存在，且 Google Drive 回補失敗：${msg}` }, { status: 404 })
+    }
   }
 }
 

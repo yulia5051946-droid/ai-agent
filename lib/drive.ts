@@ -78,3 +78,13 @@ export async function deleteFileFromDrive(accessToken: string, driveFileId: stri
   const drive = google.drive({ version: 'v3', auth })
   await drive.files.delete({ fileId: driveFileId, supportsAllDrives: true })
 }
+
+export async function downloadFileFromDrive(accessToken: string, driveFileId: string): Promise<Buffer> {
+  const auth = getAuth(accessToken)
+  const drive = google.drive({ version: 'v3', auth })
+  const res = await drive.files.get(
+    { fileId: driveFileId, alt: 'media', supportsAllDrives: true },
+    { responseType: 'arraybuffer' }
+  )
+  return Buffer.from(res.data as ArrayBuffer)
+}
