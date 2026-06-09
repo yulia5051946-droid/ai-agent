@@ -3,7 +3,7 @@ import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
 import { fetchAllSheetData, filterSheetDataByGame, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
-import { upsertContractCache, getContractCache, getAllTeamMembers, isBDMember } from '@/lib/db'
+import { upsertContractCache, getContractCache, getAllTeamMembers, isBDMember, saveEmailTimeline } from '@/lib/db'
 import { extractLatestContractVersion, extractAppliedDate, detectFinanceInfo } from '@/lib/gmail'
 import type { ContractStatus, GameType, SheetContractData } from '@/types'
 
@@ -61,6 +61,7 @@ export async function POST(request: Request) {
   try {
     const teamMembers = getAllTeamMembers()
     const analysis = await analyzeContractThread(thread, teamMembers)
+    saveEmailTimeline(grNumber, analysis.timeline)
     const lastMsg = thread.messages[thread.messages.length - 1]
     const contractVersion = extractLatestContractVersion(thread.messages)
     const appliedAt = extractAppliedDate(thread.messages)

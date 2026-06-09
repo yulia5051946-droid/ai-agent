@@ -3,7 +3,7 @@ import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
 import { fetchAllSheetData, filterSheetDataByGame, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
-import { addActivityLog, getContractCache, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, setManualGame } from '@/lib/db'
+import { addActivityLog, getContractCache, getEmailTimeline, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, saveEmailTimeline, setManualGame } from '@/lib/db'
 import type { ContractDetail, ContractStatus, GameType } from '@/types'
 
 function detectGame(subject: string): GameType {
@@ -39,6 +39,7 @@ export async function GET(
   }
 
   const analysis = await analyzeContractThread(thread)
+  saveEmailTimeline(grNumber, analysis.timeline)
   const lock = getManualLock(grNumber)
   const invoice = getInvoiceRecord(grNumber)
 
@@ -201,7 +202,7 @@ function buildDetailFromCache(
     financeConfirmed: cached.financeConfirmed,
     nextAction: cached.nextAction || undefined,
     summary: cached.summary || undefined,
-    timeline: [],
+    timeline: getEmailTimeline(cached.grNumber),
     financeInfo: invoice
       ? {
           confirmed: cached.financeConfirmed,

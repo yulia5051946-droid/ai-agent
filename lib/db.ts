@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3'
 import path from 'path'
 import fs from 'fs'
-import type { ContractCache, ManualLock, InvoiceRecord, ContractStatus } from '@/types'
+import type { ContractCache, ManualLock, InvoiceRecord, ContractStatus, EmailTimelineItem } from '@/types'
 
 const DB_PATH = process.env.DB_PATH || './data/contracts.db'
 
@@ -115,6 +115,14 @@ function initSchema(database: Database.Database) {
       access_token TEXT,
       expires_at INTEGER,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS email_timelines (
+      gr_number TEXT PRIMARY KEY,
+      timeline_json TEXT NOT NULL,
+      message_count INTEGER NOT NULL,
+      attachment_count INTEGER NOT NULL,
+      synced_at TEXT NOT NULL
     );
   `)
 }
@@ -405,6 +413,38 @@ function rowToCache(row: Record<string, unknown>): ContractCache {
     responsiblePerson: row.responsible_person as string | null,
     legalProgressNote: row.legal_progress_note as string | null,
     sheetLinkMode: (row.sheet_link_mode as 'auto' | 'manual' | null) || 'auto',
+  }
+}
+
+export function saveEmailTimeline(grNumber: string, timeline: EmailTimelineItem[]): void {
+  const database = getDb()
+  const attachmentCount = timeline.reduce((sum, item) => sum + (item.attachments?.length || 0), 0)
+  database.prepare(`
+    INSERT INTO email_timelines (gr_number, timeline_json, message_count, attachment_count, synced_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(gr_number) DO UPDATE SET
+      timeline_json = excluded.timeline_json,
+      message_count = excluded.message_count,
+      attachment_count = excluded.attachment_count,
+      synced_at = excluded.synced_at
+  `).run(
+    grNumber.toUpperCase(),
+    JSON.stringify(timeline),
+    timeline.length,
+    attachmentCount,
+    new Date().toISOString()
+  )
+}
+
+export function getEmailTimeline(grNumber: string): EmailTimelineItem[] {
+  const database = getDb()
+  const row = database.prepare('SELECT timeline_json FROM email_timelines WHERE gr_number = ?').get(grNumber.toUpperCase()) as { timeline_json: string } | undefined
+  if (!row) return []
+  try {
+    const parsed = JSON.parse(row.timeline_json) as EmailTimelineItem[]
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
   }
 }
 

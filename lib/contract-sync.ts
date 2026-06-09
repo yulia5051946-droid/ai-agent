@@ -1,6 +1,7 @@
 import {
   getAllContractCache,
   getAllTeamMembers,
+  saveEmailTimeline,
   upsertContractCache,
   upsertInvoiceRecord,
 } from '@/lib/db'
@@ -71,6 +72,7 @@ export async function runContractSync(
     threads.map(async thread => {
       try {
         const analysis = await analyzeContractThread(thread, teamMembers)
+        saveEmailTimeline(thread.grNumber, analysis.timeline)
         const lastMsg = thread.messages[thread.messages.length - 1]
         const contractVersion = extractLatestContractVersion(thread.messages)
         const appliedAt = extractAppliedDate(thread.messages)
