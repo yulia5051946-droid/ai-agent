@@ -2,11 +2,15 @@ import { NextResponse } from 'next/server'
 import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread } from '@/lib/claude'
+import { isBDMember } from '@/lib/db'
 
 export async function POST(request: Request) {
   const session = await auth()
   if (!session?.accessToken) {
     return NextResponse.json({ error: '未授權' }, { status: 401 })
+  }
+  if (!isBDMember(session.user?.email || '')) {
+    return NextResponse.json({ error: '只有 BD 成員可以直接查詢 Gmail 郵件' }, { status: 403 })
   }
 
   const body = await request.json() as { grNumber: string }

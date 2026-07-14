@@ -3,7 +3,7 @@ import { auth } from '@/auth'
 import { fetchThreadByGrNumber } from '@/lib/gmail'
 import { analyzeContractThread, extractDescription } from '@/lib/claude'
 import { fetchAllSheetData, filterSheetDataByGame, matchSheetData, writeGrNumberToSheet } from '@/lib/sheets'
-import { addActivityLog, getContractCache, getEmailTimeline, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, saveEmailTimeline, setManualGame } from '@/lib/db'
+import { addActivityLog, getContractCache, getEmailTimeline, getManualLock, setManualLock, removeManualLock, getInvoiceRecord, isBDMember, saveEmailTimeline, setManualGame } from '@/lib/db'
 import type { ContractDetail, ContractStatus, GameType } from '@/types'
 
 function detectGame(subject: string): GameType {
@@ -24,26 +24,30 @@ export async function GET(
 
   const { id } = await params
   const grNumber = id.toUpperCase()
+  const isBD = isBDMember(session.user?.email || '')
+  const cached = getContractCache(grNumber)
+  const lock = getManualLock(grNumber)
+  const invoice = getInvoiceRecord(grNumber)
 
-  // Fetch live thread from Gmail
-  const thread = await fetchThreadByGrNumber(session.accessToken, grNumber).catch(() => null)
-
-  if (!thread) {
-    const cached = getContractCache(grNumber)
+  if (!isBD) {
     if (!cached) {
       return NextResponse.json({ error: `找不到合約 ${grNumber}` }, { status: 404 })
     }
-    const lock = getManualLock(grNumber)
-    const invoice = getInvoiceRecord(grNumber)
+    return NextResponse.json(buildDetailFromCache(cached, lock, invoice))
+  }
+
+  // Fetch live thread from BD Gmail only
+  const thread = await fetchThreadByGrNumber(session.accessToken, grNumber).catch(() => null)
+
+  if (!thread) {
+    if (!cached) {
+      return NextResponse.json({ error: `找不到合約 ${grNumber}` }, { status: 404 })
+    }
     return NextResponse.json(buildDetailFromCache(cached, lock, invoice))
   }
 
   const analysis = await analyzeContractThread(thread)
   saveEmailTimeline(grNumber, analysis.timeline)
-  const lock = getManualLock(grNumber)
-  const invoice = getInvoiceRecord(grNumber)
-
-  const cached = getContractCache(grNumber)
 
   let sheetData = undefined
   try {

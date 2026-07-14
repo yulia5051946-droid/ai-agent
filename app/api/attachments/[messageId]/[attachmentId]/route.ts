@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { auth as getAuth } from '@/auth'
 import { google } from 'googleapis'
+import { isBDMember } from '@/lib/db'
 
 export async function GET(
   request: Request,
@@ -8,6 +9,9 @@ export async function GET(
 ) {
   const session = await getAuth()
   if (!session?.accessToken) return NextResponse.json({ error: '未授權' }, { status: 401 })
+  if (!isBDMember(session.user?.email || '')) {
+    return NextResponse.json({ error: '只有 BD 成員可以讀取郵件附件' }, { status: 403 })
+  }
 
   const { messageId, attachmentId } = await params
   const { searchParams } = new URL(request.url)
